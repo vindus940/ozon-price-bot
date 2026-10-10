@@ -124,6 +124,9 @@ fn conditions(watch: &Watch) -> String {
         parts.push(format!("отзывов от {reviews}"));
     }
     parts.extend(watch.ozon.labels().into_iter().map(String::from));
+    if watch.new_only {
+        parts.push("только новые".into());
+    }
     if !watch.stop_words.is_empty() {
         parts.push(format!("без: {}", watch.stop_words.join(", ")));
     }

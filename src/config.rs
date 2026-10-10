@@ -1,4 +1,5 @@
 use std::env;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ pub struct Config {
 
 impl Config {
     /// Токен и ID из окна программы важнее `.env`; остальное — из `.env`.
-    pub fn load(user: &UserSettings) -> Result<Self> {
+    pub fn load(user: &UserSettings, app_dir: &Path) -> Result<Self> {
         let users = owner_first(
             user.telegram_user_id,
             user_ids(&env::var("ALLOWED_USERS").unwrap_or_default())?,
@@ -44,12 +45,29 @@ impl Config {
                     .unwrap_or_else(|_| DEFAULT_BROWSER.into())
                     .into(),
                 debug_port: number("DEBUG_PORT", 9222)?,
-                profile_dir: env::current_dir()?.join("browser-profile"),
+                profile_dir: app_dir.join("browser-profile"),
             },
             ozon_portions: number("PORTIONS", 10)?,
             self_check: self_check()?,
         })
     }
+}
+
+/// Папка программы: в ней `data`, профиль браузера и `.env`, откуда бы программу ни запустили.
+/// Иначе запуск из другой папки начинал всё с нуля: без слежек и с новым профилем, где Авито снова просит проверку.
+pub fn app_dir() -> PathBuf {
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    exe_dir.map_or_else(|| PathBuf::from("."), |dir| project_root(&dir).unwrap_or(dir))
+}
+
+/// Собранная из исходников программа лежит в `target\debug` или `target\release` — её папка тогда корень проекта.
+fn project_root(exe_dir: &Path) -> Option<PathBuf> {
+    let build = exe_dir.file_name()?.to_str()?;
+    let target = exe_dir.parent()?;
+    let from_sources = matches!(build, "debug" | "release") && target.file_name()? == "target";
+    from_sources.then(|| target.parent().map(Path::to_path_buf))?
 }
 
 fn owner_first(owner: Option<u64>, mut users: Vec<u64>) -> Vec<u64> {
@@ -92,6 +110,15 @@ fn user_ids(list: &str) -> Result<Vec<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn program_built_from_sources_lives_in_the_project_folder() {
+        let project = Path::new(r"C:\Users\me\IdeaProjects\ozon-price-bot");
+        assert_eq!(project_root(&project.join(r"target\release")).as_deref(), Some(project));
+        assert_eq!(project_root(&project.join(r"target\debug")).as_deref(), Some(project));
+        assert_eq!(project_root(Path::new(r"C:\Program Files\ozon-price-bot")), None);
+        assert_eq!(project_root(Path::new(r"C:\Users\me\release")), None);
+    }
 
     #[test]
     fn user_ids_keep_order_and_reject_typos() {

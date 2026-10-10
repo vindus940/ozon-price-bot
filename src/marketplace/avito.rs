@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -8,19 +7,18 @@ use regex::Regex;
 use reqwest::Url;
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep};
 
 use crate::browser::{Browser, Tab};
+use crate::marketplace::page::{self, PageState, ScriptPage};
 use crate::marketplace::{Area, OfferSource, SourceError};
 use crate::offer::Offer;
 
 const HOME: &str = "https://www.avito.ru/";
 const READ_SCRIPT: &str = include_str!("avito/read.js");
-const PAGE_TIMEOUT: Duration = Duration::from_secs(30);
-const POLL_INTERVAL: Duration = Duration::from_millis(700);
 /// Сортировка «по дате»: свежие объявления первыми — ради них и проверяем.
 const NEWEST_FIRST: &str = "104";
-const MARK_PAGE_STALE: &str = "window.__huntStale = true";
+/// Так Авито отвечает, например, на опечатку в городе: avito.ru/moskwa.
+const NOT_FOUND: &str = "Авито ответил «страница не найдена» — проверьте город в «Настройках»";
 
 /// Авито отдаёт выдачу только при настоящем переходе на страницу (запрос из скрипта получает пустой каркас),
 /// поэтому вкладка открывает страницу поиска, как человек, и читает готовые карточки.
@@ -29,16 +27,6 @@ pub struct Avito {
     region: String,
     /// Одна вкладка — один поиск за раз. Под тем же замком — запомненные категории запросов.
     category_paths: Mutex<HashMap<String, String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PageState {
-    Loading,
-    Captcha,
-    NotFound,
-    /// Объявления или «ничего не найдено» — выдача готова.
-    Listings,
 }
 
 #[derive(Deserialize)]
@@ -138,7 +126,16 @@ impl Page {
             )
             .into());
         }
-        Ok(offers)
+        // Забронированное уже не купить: продавец придержал его для другого покупателя.
+        Ok(offers
+            .into_iter()
+            .filter(|offer| {
+                !offer
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| text.contains("Забронировано"))
+            })
+            .collect())
     }
 }
 
@@ -159,26 +156,16 @@ fn search_url(path: &str, query: &str, area: Option<Area>) -> anyhow::Result<Url
 
 /// Переходит по адресу и ждёт, пока новая страница покажет объявления, «ничего не найдено», проверку или 404.
 async fn open(tab: &Tab, url: &str) -> Result<Page, SourceError> {
-    tab.evaluate::<bool>(MARK_PAGE_STALE).await?;
-    tab.navigate(url).await?;
-    let deadline = Instant::now() + PAGE_TIMEOUT;
-    loop {
-        sleep(POLL_INTERVAL).await;
-        if let Ok(page) = tab.evaluate::<Page>(READ_SCRIPT).await
-            && !page.stale
-        {
-            match page.state {
-                PageState::Loading => {}
-                PageState::Captcha => return Err(SourceError::Captcha),
-                PageState::NotFound => {
-                    return Err(anyhow!("Авито ответил «страница не найдена» — проверьте город в «Настройках»").into());
-                }
-                PageState::Listings => return Ok(page),
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(SourceError::NotReady);
-        }
+    page::open(tab, url, READ_SCRIPT, NOT_FOUND).await
+}
+
+impl ScriptPage for Page {
+    fn stale(&self) -> bool {
+        self.stale
+    }
+
+    fn state(&self) -> &PageState {
+        &self.state
     }
 }
 
@@ -319,6 +306,18 @@ mod tests {
         assert!(
             matches!(broken, Err(SourceError::Failed(error)) if error.to_string().contains("поменял устройство карточек"))
         );
+    }
+
+    #[test]
+    fn reserved_listings_are_skipped() {
+        let reserved = Card {
+            text: Some("Забронировано Наушники logitech g435 1 300 ₽".into()),
+            ..card(Some("1300"), None)
+        };
+        let offers = page(None, vec![reserved, card(Some("3510"), None)])
+            .into_offers()
+            .unwrap();
+        assert_eq!(offers.iter().map(|offer| offer.price).collect::<Vec<_>>(), [3510]);
     }
 
     #[test]

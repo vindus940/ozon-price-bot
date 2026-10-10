@@ -17,7 +17,6 @@ mod text;
 mod wait;
 
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -28,6 +27,7 @@ use crate::config::Config;
 use crate::health::ParserCheck;
 use crate::hunt::{Hunter, Notifier};
 use crate::marketplace::avito::Avito;
+use crate::marketplace::dns::Dns;
 use crate::marketplace::ozon::Ozon;
 use crate::marketplace::{OfferSource, SourceError, SourceKind};
 use crate::search::OfferSearch;
@@ -37,12 +37,13 @@ use crate::telegram::TelegramAlerts;
 
 /// Окно — в основном потоке; проверки слежек, Telegram и браузер — в фоне.
 fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
+    let app_dir = config::app_dir();
+    dotenvy::from_path(app_dir.join(".env")).ok();
     init_logging();
 
-    let storage = Storage::new(env::current_dir()?.join("data"));
+    let storage = Storage::new(app_dir.join("data"));
     let settings: UserSettings = storage.load(settings::FILE);
-    let config = Config::load(&settings)?;
+    let config = Config::load(&settings, &app_dir)?;
     let runtime = tokio::runtime::Runtime::new()?;
     let _inside_runtime = runtime.enter();
 
@@ -50,7 +51,8 @@ fn main() -> Result<()> {
     let ozon = Arc::new(Ozon::new(Arc::clone(&browser), config.ozon_portions));
     runtime.spawn(open_ozon(Arc::clone(&ozon)));
     let ozon: Arc<dyn OfferSource> = ozon;
-    let avito: Arc<dyn OfferSource> = Arc::new(Avito::new(browser, settings.avito_region.clone()));
+    let avito: Arc<dyn OfferSource> = Arc::new(Avito::new(Arc::clone(&browser), settings.avito_region.clone()));
+    let dns: Arc<dyn OfferSource> = Arc::new(Dns::new(browser));
 
     let bot = config.telegram.as_ref().map(|telegram| Bot::new(&telegram.token));
     let owner = config.telegram.as_ref().and_then(|telegram| telegram.owner);
@@ -60,7 +62,11 @@ fn main() -> Result<()> {
         .map(|(bot, owner)| Arc::new(TelegramAlerts::new(bot, owner)) as Arc<dyn Notifier>);
 
     let hunter = Arc::new(Hunter::new(
-        HashMap::from([(SourceKind::Ozon, Arc::clone(&ozon)), (SourceKind::Avito, avito)]),
+        HashMap::from([
+            (SourceKind::Ozon, Arc::clone(&ozon)),
+            (SourceKind::Avito, avito),
+            (SourceKind::Dns, dns),
+        ]),
         notifier,
         storage.clone(),
         settings.home,

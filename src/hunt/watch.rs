@@ -36,6 +36,10 @@ pub struct Watch {
     /// «Доставка до завтра», «только Ozon» — только для Ozon: у Авито этих данных нет.
     #[serde(default)]
     pub ozon: OzonConditions,
+    /// Только новые: объявления с признаками б/у не участвуют ни в рынке, ни в находках —
+    /// новая и ношеная вещь разный товар. Для Авито: на Ozon всё новое.
+    #[serde(default)]
+    pub new_only: bool,
     pub every_minutes: u32,
     pub enabled: bool,
 }
@@ -58,6 +62,7 @@ impl Watch {
             },
             include_suspicious: false,
             ozon: OzonConditions::default(),
+            new_only: false,
             every_minutes: 15,
             enabled: true,
         }

@@ -39,6 +39,7 @@ pub(super) struct WatchForm {
     costs: u64,
     include_suspicious: bool,
     ozon: OzonConditions,
+    new_only: bool,
     every_minutes: u32,
     pub(super) problems: Vec<String>,
 }
@@ -73,6 +74,7 @@ impl WatchForm {
             costs,
             include_suspicious: watch.include_suspicious,
             ozon: watch.ozon,
+            new_only: watch.new_only,
             every_minutes: watch.every_minutes,
             problems: Vec::new(),
         }
@@ -131,6 +133,9 @@ impl WatchForm {
                     ui.radio_value(&mut self.source, source, source.title());
                 }
             });
+            if let Some(note) = self.source.note() {
+                ui.weak(note);
+            }
             if !is_connected(self.source) {
                 ui.colored_label(
                     WARN,
@@ -223,6 +228,15 @@ impl WatchForm {
                 ui.checkbox(&mut self.ozon.by_tomorrow, "Привезут не позже завтра");
                 ui.checkbox(&mut self.ozon.only_ozon, "Только Ozon");
                 ui.weak("рынок всё равно считается по всем продавцам");
+            });
+            ui.end_row();
+        }
+
+        if self.source.has_used_goods() {
+            ui.label("Состояние");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.new_only, "Только новые — без б/у");
+                ui.weak("по словам продавца: «б/у», «пользовался», «состояние 9/10»; рынок тоже только по новым");
             });
             ui.end_row();
         }
@@ -352,6 +366,7 @@ impl WatchForm {
             } else {
                 OzonConditions::default()
             },
+            new_only: self.new_only && self.source.has_used_goods(),
             every_minutes: self.every_minutes,
             enabled: self.enabled,
         })
@@ -416,6 +431,7 @@ mod tests {
             },
             include_suspicious: true,
             ozon: OzonConditions::default(),
+            new_only: true,
             every_minutes: 20,
             enabled: false,
         };

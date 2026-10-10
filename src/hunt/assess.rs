@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Local};
 
+use crate::hunt::category::looks_used;
 use crate::hunt::deal::{Deal, evaluate};
 use crate::hunt::market::{Market, MarketPrice, Pricing};
 use crate::hunt::watch::Watch;
@@ -35,11 +36,9 @@ impl Assessment {
 pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assessment {
     let scanned = offers.len();
     let similar = OfferFilter::new(&watch.comparables_request());
-    let comparables = without_copies(
-        offers
-            .into_iter()
-            .filter(|offer| similar.accepts(offer) && watch.category.accepts(&watch.query, offer)),
-    );
+    let comparables = without_copies(offers.into_iter().filter(|offer| {
+        similar.accepts(offer) && watch.category.accepts(&watch.query, offer) && !(watch.new_only && looks_used(offer))
+    }));
     let Some(pricing) = Pricing::for_offers(watch.category, &comparables) else {
         return Assessment::without_market(scanned, 0);
     };
@@ -113,6 +112,39 @@ mod tests {
     use crate::hunt::watch::Goal;
     use crate::marketplace::SourceKind;
     use crate::search::{OzonConditions, PriceRange};
+
+    #[test]
+    fn new_only_compares_new_with_new() {
+        let listing = |price: u64, text: &str| Offer {
+            url: format!("https://www.avito.ru/{price}"),
+            description: Some(text.into()),
+            ..Offer::sample("Наушники Logitech G435", price)
+        };
+        let mut offers: Vec<Offer> = [6_000, 6_200, 6_400, 6_500, 6_800]
+            .map(|price| listing(price, "Новые, в упаковке"))
+            .to_vec();
+        offers.extend([
+            listing(1_500, "После покупки пользовался около года"),
+            listing(1_700, "Оригинал, состояние 9/10"),
+            listing(4_900, "Новые, запечатаны"),
+        ]);
+        let new_only = Watch {
+            query: "logitech g435".into(),
+            category: Category::Any,
+            source: SourceKind::Avito,
+            new_only: true,
+            ..iphone_watch()
+        };
+
+        let assessment = assess(&new_only, offers, Local::now());
+
+        assert_eq!(assessment.comparable, 6, "б/у не участвуют в рынке новых");
+        assert_eq!(assessment.market, Some(MarketPrice::Whole(6_300)));
+        assert_eq!(
+            assessment.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [4_900]
+        );
+    }
 
     #[test]
     fn market_ignores_accessories_and_other_versions_and_your_price_filter() {
