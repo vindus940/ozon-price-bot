@@ -1,0 +1,684 @@
+mod assess;
+mod book;
+mod category;
+mod deal;
+mod feed;
+#[cfg(test)]
+mod fixtures;
+mod journal;
+mod market;
+mod memory;
+mod schedule;
+mod watch;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::Local;
+use serde::Serialize;
+use tokio::sync::Notify;
+
+use assess::{Assessment, assess};
+use book::WatchBook;
+pub use category::Category;
+pub use deal::Deal;
+use feed::Feed;
+use journal::Journal;
+pub use journal::JournalEntry;
+use market::MIN_SAMPLE;
+/// По имени нужны только тестам текстов: остальной код берёт их из находки и итога проверки.
+#[cfg(test)]
+pub use market::{MarketPrice, PerUnit};
+use memory::Notified;
+use schedule::Schedule;
+pub use schedule::{Outcome, RunStatus};
+pub use watch::{Goal, Watch};
+
+use crate::geo::GeoPoint;
+use crate::marketplace::{OfferSource, SourceError, SourceKind};
+use crate::storage::Storage;
+
+const SCHEDULE_TICK: Duration = Duration::from_secs(30);
+
+pub enum Alert<'a> {
+    /// Первая проверка слежки: что подходит прямо сейчас. Дальше — только новое.
+    Started {
+        watch: &'a Watch,
+        deals: &'a [Deal],
+    },
+    NewDeals {
+        watch: &'a Watch,
+        deals: &'a [Deal],
+    },
+    /// Слежка перестала работать. Приходит один раз, а не при каждой неудачной проверке.
+    Failed {
+        watch: &'a Watch,
+        reason: &'a str,
+    },
+    Test,
+}
+
+/// Куда отправлять находки. Охотник не знает, что это Telegram.
+#[async_trait]
+pub trait Notifier: Send + Sync {
+    async fn notify(&self, alert: Alert<'_>) -> anyhow::Result<()>;
+}
+
+/// Всё, что меняется во время работы, — под одним замком: окно читает, проверки пишут.
+struct State {
+    book: WatchBook,
+    schedule: Schedule,
+    feed: Feed,
+    notified: Notified,
+    journal: Journal,
+    home: Option<GeoPoint>,
+}
+
+impl State {
+    fn save_watches(&mut self, storage: &Storage) {
+        save(storage, &mut self.journal, book::FILE, &self.book);
+    }
+
+    fn save_deals(&mut self, storage: &Storage) {
+        save(storage, &mut self.journal, feed::FILE, &self.feed);
+    }
+
+    fn save_notified(&mut self, storage: &Storage) {
+        save(storage, &mut self.journal, memory::FILE, &self.notified);
+    }
+}
+
+/// Не сохранилось — пишем в журнал и работаем дальше: в памяти всё есть, файл перепишется при следующем изменении.
+fn save(storage: &Storage, journal: &mut Journal, file: &str, value: &impl Serialize) {
+    if let Err(error) = storage.save(file, value) {
+        journal.write(format!("Не удалось сохранить {file}: {error:#}"));
+    }
+}
+
+/// Охотник связывает части: берёт слежку из списка, когда подходит её время, ищет на площадке, оценивает найденное,
+/// записывает итог и сообщает о новом. Сами правила — в частях: что выгодно — `assess`, когда проверять — `schedule`,
+/// что уже отправлено — `memory`.
+pub struct Hunter {
+    sources: HashMap<SourceKind, Arc<dyn OfferSource>>,
+    notifier: Option<Arc<dyn Notifier>>,
+    storage: Storage,
+    state: Mutex<State>,
+    wake: Notify,
+}
+
+impl Hunter {
+    pub fn new(
+        sources: HashMap<SourceKind, Arc<dyn OfferSource>>,
+        notifier: Option<Arc<dyn Notifier>>,
+        storage: Storage,
+        home: Option<GeoPoint>,
+    ) -> Self {
+        let state = State {
+            book: storage.load(book::FILE),
+            schedule: Schedule::default(),
+            feed: storage.load(feed::FILE),
+            notified: storage.load(memory::FILE),
+            journal: Journal::default(),
+            home,
+        };
+        Self {
+            sources,
+            notifier,
+            storage,
+            state: Mutex::new(state),
+            wake: Notify::new(),
+        }
+    }
+
+    pub fn watches(&self) -> Vec<Watch> {
+        self.state().book.all().to_vec()
+    }
+
+    pub fn run_status(&self, watch_id: u64) -> Option<RunStatus> {
+        self.state().schedule.status(watch_id)
+    }
+
+    /// Находки, свежие первыми.
+    pub fn deals(&self) -> Vec<Deal> {
+        self.state().feed.deals()
+    }
+
+    pub fn deals_count(&self) -> usize {
+        self.state().feed.count()
+    }
+
+    pub fn journal(&self) -> Vec<JournalEntry> {
+        self.state().journal.entries()
+    }
+
+    pub fn home(&self) -> Option<GeoPoint> {
+        self.state().home
+    }
+
+    pub fn notifications_enabled(&self) -> bool {
+        self.notifier.is_some()
+    }
+
+    pub fn is_connected(&self, source: SourceKind) -> bool {
+        self.sources.contains_key(&source)
+    }
+
+    pub fn is_checking(&self, watch_id: u64) -> bool {
+        self.state().schedule.is_checking(watch_id)
+    }
+
+    pub fn is_queued(&self, watch_id: u64) -> bool {
+        self.state().schedule.is_queued(watch_id)
+    }
+
+    /// Новая слежка (id = 0) или правка существующей. Правка начинает слежку заново:
+    /// старая память об отправленном относится к другим условиям.
+    pub fn save_watch(&self, watch: Watch) -> Result<u64, Vec<String>> {
+        let mut state = self.state();
+        let problems = watch.problems(state.home.is_some());
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        let name = watch.name.clone();
+        let watch_id = state.book.save(watch).map_err(|problem| vec![problem])?;
+        state.notified.forget(watch_id);
+        state.schedule.forget(watch_id);
+        state.journal.write(format!("Слежка «{name}» сохранена"));
+        state.save_watches(&self.storage);
+        state.save_notified(&self.storage);
+        drop(state);
+        self.wake.notify_one();
+        Ok(watch_id)
+    }
+
+    pub fn delete_watch(&self, watch_id: u64) {
+        let mut state = self.state();
+        let Some(watch) = state.book.remove(watch_id) else {
+            return;
+        };
+        state.notified.forget(watch_id);
+        state.schedule.forget(watch_id);
+        state.journal.write(format!("Слежка «{}» удалена", watch.name));
+        state.save_watches(&self.storage);
+        state.save_notified(&self.storage);
+    }
+
+    pub fn set_enabled(&self, watch_id: u64, enabled: bool) {
+        let mut state = self.state();
+        if state.book.set_enabled(watch_id, enabled) {
+            state.save_watches(&self.storage);
+        }
+    }
+
+    pub fn run_now(&self, watch_id: u64) {
+        self.state().schedule.check_soon(watch_id);
+        self.wake.notify_one();
+    }
+
+    /// Слежки, которые ждали дома и упали без него, проверяются сразу, а не через свой интервал.
+    pub fn set_home(&self, home: Option<GeoPoint>) {
+        let mut state = self.state();
+        state.home = home;
+        state.schedule.retry_failed();
+        drop(state);
+        self.wake.notify_one();
+    }
+
+    pub fn clear_deals(&self) {
+        let mut state = self.state();
+        state.feed.clear();
+        state.save_deals(&self.storage);
+    }
+
+    pub async fn send_test(&self) -> anyhow::Result<()> {
+        let notifier = self
+            .notifier
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Telegram не настроен"))?;
+        notifier.notify(Alert::Test).await
+    }
+
+    /// Проверяет слежки по расписанию и по кнопке «Проверить сейчас» — строго по одной,
+    /// чтобы не дёргать площадку параллельно.
+    pub async fn run(self: Arc<Self>) {
+        loop {
+            while let Some(watch_id) = self.next_to_check() {
+                self.check(watch_id).await;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(SCHEDULE_TICK) => {}
+                () = self.wake.notified() => {}
+            }
+        }
+    }
+
+    fn next_to_check(&self) -> Option<u64> {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        state.schedule.next(state.book.all(), Local::now())
+    }
+
+    async fn check(&self, watch_id: u64) {
+        self.state().schedule.start(watch_id);
+        self.check_watch(watch_id).await;
+        self.state().schedule.finish();
+    }
+
+    async fn check_watch(&self, watch_id: u64) {
+        let Some((watch, home)) = ({
+            let state = self.state();
+            state.book.get(watch_id).cloned().map(|watch| (watch, state.home))
+        }) else {
+            return;
+        };
+
+        let Some(source) = self.sources.get(&watch.source) else {
+            let reason = format!("{} ещё не подключено — нужна разовая настройка", watch.source.title());
+            self.fail(&watch, reason).await;
+            return;
+        };
+
+        if watch.radius_km.is_some() && home.is_none() {
+            self.fail(&watch, "не указан дом — укажите его координаты в «Настройках»".into())
+                .await;
+            return;
+        }
+
+        match source.search(&watch.query, watch.search_area(home)).await {
+            Ok(offers) => {
+                let assessment = assess(&watch, offers, Local::now());
+                if let Some((first_run, news)) = self.record(&watch, &assessment) {
+                    self.alert(&watch, first_run, &news).await;
+                }
+            }
+            Err(error) => self.fail(&watch, failure_reason(watch.source.title(), &error)).await,
+        }
+    }
+
+    /// Сверяет находки с памятью и запоминает их. `None` — слежку успели изменить или удалить, пока шла проверка.
+    fn record(&self, watch: &Watch, assessment: &Assessment) -> Option<(bool, Vec<Deal>)> {
+        let mut state = self.state();
+        if !state.book.still_has(watch) {
+            return None;
+        }
+
+        let first_run = state.notified.is_first_run(watch.id);
+        let news = state.notified.take_news(watch.id, &assessment.suitable);
+        state.feed.add(&news);
+        state.journal.write(summary(watch, assessment, news.len()));
+        let outcome = Outcome::Checked {
+            scanned: assessment.scanned,
+            comparable: assessment.comparable,
+            market: assessment.market,
+            suitable: assessment.suitable.len(),
+            news: news.len(),
+            hidden_suspicious: assessment.hidden_suspicious,
+        };
+        state.schedule.record(watch.id, Local::now(), outcome);
+        state.save_deals(&self.storage);
+        state.save_notified(&self.storage);
+        Some((first_run, news))
+    }
+
+    /// Запоминает неудачу и сообщает о ней, только если до этого слежка работала.
+    async fn fail(&self, watch: &Watch, reason: String) {
+        let newly_failed = {
+            let mut state = self.state();
+            state
+                .journal
+                .write(format!("«{}»: проверка не удалась — {reason}", watch.name));
+            state
+                .schedule
+                .record(watch.id, Local::now(), Outcome::Failed(reason.clone()))
+        };
+        if newly_failed && let Some(notifier) = &self.notifier {
+            let alert = Alert::Failed { watch, reason: &reason };
+            if let Err(error) = notifier.notify(alert).await {
+                self.state()
+                    .journal
+                    .write(format!("Не удалось отправить уведомление: {error:#}"));
+            }
+        }
+    }
+
+    async fn alert(&self, watch: &Watch, first_run: bool, news: &[Deal]) {
+        let Some(notifier) = &self.notifier else { return };
+        let alert = if first_run {
+            Alert::Started { watch, deals: news }
+        } else if news.is_empty() {
+            return;
+        } else {
+            Alert::NewDeals { watch, deals: news }
+        };
+        if let Err(error) = notifier.notify(alert).await {
+            let mut state = self.state();
+            for deal in news {
+                state.notified.forget_offer(watch.id, &deal.offer.url);
+            }
+            state.save_notified(&self.storage);
+            state.journal.write(format!(
+                "Не удалось отправить уведомление, повторю при следующей проверке: {error:#}"
+            ));
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn summary(watch: &Watch, assessment: &Assessment, news: usize) -> String {
+    match assessment.market {
+        Some(market) => format!(
+            "«{}»: найдено {}, похожих {}, рынок {market}, выгодных {}, новых {news}, подозрительно дешёвых скрыто {}",
+            watch.name,
+            assessment.scanned,
+            assessment.comparable,
+            assessment.suitable.len(),
+            assessment.hidden_suspicious
+        ),
+        None => format!(
+            "«{}»: найдено {}, похожих {} — меньше {MIN_SAMPLE}, рыночную цену не посчитать; уточните запрос или категорию",
+            watch.name, assessment.scanned, assessment.comparable
+        ),
+    }
+}
+
+fn failure_reason(source: &str, error: &SourceError) -> String {
+    match error {
+        SourceError::Captcha => {
+            format!("{source} просит подтвердить, что вы не робот — пройдите проверку в окне браузера программы")
+        }
+        SourceError::NotReady => format!(
+            "страница {source} не открылась — посмотрите окно браузера программы, возможно, там проверка «я не робот»"
+        ),
+        SourceError::Failed(error) => format!("{error:#}"),
+    }
+}
+
+/// Охотник целиком: с подставной площадкой, подставным Telegram и настоящими файлами во временной папке.
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::hunt::fixtures::{iphone_watch, market_offers, phone};
+    use crate::marketplace::Area;
+    use crate::offer::Offer;
+
+    #[derive(Default)]
+    struct ChangingSource {
+        offers: StdMutex<Vec<Offer>>,
+        captcha: AtomicBool,
+    }
+
+    impl ChangingSource {
+        fn with(offers: Vec<Offer>) -> Arc<Self> {
+            Arc::new(Self {
+                offers: StdMutex::new(offers),
+                ..Self::default()
+            })
+        }
+    }
+
+    #[async_trait]
+    impl OfferSource for ChangingSource {
+        fn name(&self) -> &'static str {
+            "Ozon"
+        }
+
+        async fn search(&self, _query: &str, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+            if self.captcha.load(Ordering::SeqCst) {
+                return Err(SourceError::Captcha);
+            }
+            Ok(self.offers.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingNotifier {
+        alerts: StdMutex<Vec<String>>,
+        offline: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Notifier for RecordingNotifier {
+        async fn notify(&self, alert: Alert<'_>) -> anyhow::Result<()> {
+            if self.offline.load(Ordering::SeqCst) {
+                anyhow::bail!("нет сети");
+            }
+            let text = match alert {
+                Alert::Started { deals, .. } => format!("started:{}", deals.len()),
+                Alert::NewDeals { deals, .. } => format!(
+                    "new:{}",
+                    deals
+                        .iter()
+                        .map(|d| d.offer.price.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Alert::Failed { .. } => "failed".into(),
+                Alert::Test => "test".into(),
+            };
+            self.alerts.lock().unwrap().push(text);
+            Ok(())
+        }
+    }
+
+    fn hunter_with(source: &Arc<ChangingSource>, notifier: &Arc<RecordingNotifier>, storage: &Storage) -> Hunter {
+        Hunter::new(
+            HashMap::from([
+                (SourceKind::Ozon, Arc::clone(source) as Arc<dyn OfferSource>),
+                (SourceKind::Avito, Arc::clone(source) as Arc<dyn OfferSource>),
+            ]),
+            Some(Arc::clone(notifier) as Arc<dyn Notifier>),
+            storage.clone(),
+            None,
+        )
+    }
+
+    fn alerts(notifier: &RecordingNotifier) -> Vec<String> {
+        notifier.alerts.lock().unwrap().clone()
+    }
+
+    /// Настоящие файлы во временной папке: тест заодно проверяет, что сохранённое читается. Папка удаляется,
+    /// даже если тест упал.
+    struct TempStorage(Storage);
+
+    impl std::ops::Deref for TempStorage {
+        type Target = Storage;
+
+        fn deref(&self) -> &Storage {
+            &self.0
+        }
+    }
+
+    impl Drop for TempStorage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.dir());
+        }
+    }
+
+    fn storage(test: &str) -> TempStorage {
+        let dir = std::env::temp_dir().join(format!("ozon-price-bot-hunt-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        TempStorage(Storage::new(dir))
+    }
+
+    #[tokio::test]
+    async fn first_check_reports_current_deals_then_only_new_ones() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("flow");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+
+        hunter.check(id).await;
+        source.offers.lock().unwrap().push(phone(58_000));
+        hunter.check(id).await;
+        hunter.check(id).await;
+        source.offers.lock().unwrap().push(phone(56_000));
+        hunter.check(id).await;
+
+        assert_eq!(
+            *notifier.alerts.lock().unwrap(),
+            ["started:0", "new:58000", "new:56000"]
+        );
+        assert_eq!(
+            hunter.deals().iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [56_000, 58_000]
+        );
+
+        let reloaded = Hunter::new(HashMap::new(), None, storage.clone(), None);
+        assert_eq!(reloaded.watches().len(), 1);
+        assert_eq!(reloaded.deals().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deal_not_delivered_to_telegram_is_sent_again_next_check() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("retry");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.check(id).await;
+
+        source.offers.lock().unwrap().push(phone(58_000));
+        notifier.offline.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+        notifier.offline.store(false, Ordering::SeqCst);
+        hunter.check(id).await;
+        hunter.check(id).await;
+
+        assert_eq!(alerts(&notifier), ["started:0", "new:58000"]);
+        assert_eq!(hunter.deals().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failure_is_reported_once_and_again_only_after_recovery() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("failure");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+
+        source.captcha.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+        hunter.check(id).await;
+        source.captcha.store(false, Ordering::SeqCst);
+        hunter.check(id).await;
+        source.captcha.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+
+        assert_eq!(alerts(&notifier), ["failed", "started:0", "failed"]);
+        assert!(matches!(
+            hunter.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Failed(reason)) if reason.contains("пройдите проверку в окне браузера программы")
+        ));
+    }
+
+    #[tokio::test]
+    async fn cheaper_again_offer_replaces_its_old_entry_in_deals() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("replace");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.check(id).await;
+
+        let same_listing = |price| Offer {
+            url: "https://example.com/same".into(),
+            ..phone(price)
+        };
+        source.offers.lock().unwrap().push(same_listing(58_000));
+        hunter.check(id).await;
+        source
+            .offers
+            .lock()
+            .unwrap()
+            .retain(|o| o.url != "https://example.com/same");
+        source.offers.lock().unwrap().push(same_listing(55_000));
+        hunter.check(id).await;
+
+        assert_eq!(alerts(&notifier), ["started:0", "new:58000", "new:55000"]);
+        assert_eq!(
+            hunter.deals().iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [55_000]
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_home_retries_watches_that_waited_for_it() {
+        let source = ChangingSource::with(Vec::new());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("home");
+        let hunter = Hunter::new(
+            HashMap::from([(SourceKind::Avito, Arc::clone(&source) as Arc<dyn OfferSource>)]),
+            Some(Arc::clone(&notifier) as Arc<dyn Notifier>),
+            storage.clone(),
+            Some(GeoPoint { lat: 55.75, lon: 37.62 }),
+        );
+        let id = hunter
+            .save_watch(Watch {
+                source: SourceKind::Avito,
+                radius_km: Some(5),
+                ..iphone_watch()
+            })
+            .unwrap();
+        hunter.set_home(None);
+        hunter.check(id).await;
+        assert!(matches!(
+            hunter.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Failed(_))
+        ));
+
+        hunter.set_home(Some(GeoPoint { lat: 55.75, lon: 37.62 }));
+
+        assert!(hunter.run_status(id).is_none());
+        assert_eq!(hunter.next_to_check(), Some(id));
+    }
+
+    #[test]
+    fn saving_already_deleted_watch_is_rejected() {
+        let storage = storage("deleted");
+        let hunter = Hunter::new(HashMap::new(), None, storage.clone(), None);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.delete_watch(id);
+
+        let problems = hunter.save_watch(Watch { id, ..iphone_watch() }).unwrap_err();
+
+        assert!(problems[0].contains("уже удалили"));
+        assert!(hunter.watches().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unconnected_source_is_reported_as_failure() {
+        let storage = storage("avito");
+        let hunter = Hunter::new(HashMap::new(), None, storage.clone(), None);
+        let id = hunter
+            .save_watch(Watch {
+                source: SourceKind::Avito,
+                ..iphone_watch()
+            })
+            .unwrap();
+
+        hunter.check(id).await;
+
+        assert!(matches!(
+            hunter.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Failed(reason)) if reason.contains("Авито ещё не подключено")
+        ));
+    }
+
+    #[test]
+    fn invalid_watch_is_not_saved() {
+        let storage = storage("invalid");
+        let hunter = Hunter::new(HashMap::new(), None, storage.clone(), None);
+        let problems = hunter.save_watch(Watch::new_draft()).unwrap_err();
+        assert_eq!(problems.len(), 2);
+        assert!(hunter.watches().is_empty());
+    }
+}

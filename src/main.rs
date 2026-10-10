@@ -1,0 +1,102 @@
+mod browser;
+mod config;
+mod export;
+mod format;
+mod geo;
+mod gui;
+mod health;
+mod hunt;
+mod marketplace;
+mod offer;
+mod quantity;
+mod search;
+mod settings;
+mod storage;
+mod telegram;
+mod text;
+mod wait;
+
+use std::collections::HashMap;
+use std::env;
+use std::sync::Arc;
+
+use anyhow::Result;
+use teloxide::Bot;
+
+use crate::browser::Browser;
+use crate::config::Config;
+use crate::health::ParserCheck;
+use crate::hunt::{Hunter, Notifier};
+use crate::marketplace::avito::Avito;
+use crate::marketplace::ozon::Ozon;
+use crate::marketplace::{OfferSource, SourceError, SourceKind};
+use crate::search::OfferSearch;
+use crate::settings::UserSettings;
+use crate::storage::Storage;
+use crate::telegram::TelegramAlerts;
+
+/// Окно — в основном потоке; проверки слежек, Telegram и браузер — в фоне.
+fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+    init_logging();
+
+    let storage = Storage::new(env::current_dir()?.join("data"));
+    let settings: UserSettings = storage.load(settings::FILE);
+    let config = Config::load(&settings)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _inside_runtime = runtime.enter();
+
+    let browser = Arc::new(Browser::new(config.browser)?);
+    let ozon = Arc::new(Ozon::new(Arc::clone(&browser), config.ozon_portions));
+    runtime.spawn(open_ozon(Arc::clone(&ozon)));
+    let ozon: Arc<dyn OfferSource> = ozon;
+    let avito: Arc<dyn OfferSource> = Arc::new(Avito::new(browser, settings.avito_region.clone()));
+
+    let bot = config.telegram.as_ref().map(|telegram| Bot::new(&telegram.token));
+    let owner = config.telegram.as_ref().and_then(|telegram| telegram.owner);
+    let notifier = bot
+        .clone()
+        .zip(owner)
+        .map(|(bot, owner)| Arc::new(TelegramAlerts::new(bot, owner)) as Arc<dyn Notifier>);
+
+    let hunter = Arc::new(Hunter::new(
+        HashMap::from([(SourceKind::Ozon, Arc::clone(&ozon)), (SourceKind::Avito, avito)]),
+        notifier,
+        storage.clone(),
+        settings.home,
+    ));
+    runtime.spawn(Arc::clone(&hunter).run());
+
+    if let (Some(bot), Some(telegram)) = (bot, config.telegram) {
+        let parser_check = config
+            .self_check
+            .map(|settings| ParserCheck::new(Arc::clone(&ozon), settings));
+        runtime.spawn(telegram::run(bot, telegram, OfferSearch::new(ozon), parser_check));
+    } else {
+        log::warn!("Telegram не настроен: окно работает, уведомлений не будет");
+    }
+
+    gui::run(hunter, storage, settings, runtime.handle().clone())
+}
+
+async fn open_ozon(ozon: Arc<Ozon>) {
+    match ozon.open().await {
+        Ok(()) => log::info!("браузер с Ozon открыт"),
+        Err(SourceError::Captcha | SourceError::NotReady) => {
+            log::warn!("Ozon пока не открылся: пройдите проверку в окне браузера, если она есть");
+        }
+        Err(error) => log::error!("Ozon не открылся: {error:#}"),
+    }
+}
+
+fn init_logging() {
+    // Видеодрайверы шлют в лог «ошибки», которые на работу окна не влияют и только пугают.
+    pretty_env_logger::formatted_timed_builder()
+        .filter_level(log::LevelFilter::Info)
+        .filter_module("wgpu_hal", log::LevelFilter::Off)
+        .filter_module("wgpu_core", log::LevelFilter::Warn)
+        .filter_module("egui_wgpu", log::LevelFilter::Warn)
+        .filter_module("naga", log::LevelFilter::Warn)
+        .parse_default_env()
+        .init();
+}
