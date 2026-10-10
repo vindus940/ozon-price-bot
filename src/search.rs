@@ -10,7 +10,7 @@ use crate::offer::Offer;
 use crate::quantity::{Quantity, Unit, UnitPrice, most_common_unit};
 pub use filter::OfferFilter;
 pub use order::Order;
-pub use request::{PriceRange, SearchRequest};
+pub use request::{OzonConditions, PriceRange, SearchRequest};
 
 pub struct OfferSearch {
     source: Arc<dyn OfferSource>,

@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText};
 use super::{BAD, WARN};
 use crate::hunt::{Category, Goal, Watch};
 use crate::marketplace::SourceKind;
-use crate::search::PriceRange;
+use crate::search::{OzonConditions, PriceRange};
 
 pub(super) enum FormAction {
     Keep,
@@ -38,6 +38,7 @@ pub(super) struct WatchForm {
     min_profit: u64,
     costs: u64,
     include_suspicious: bool,
+    ozon: OzonConditions,
     every_minutes: u32,
     pub(super) problems: Vec<String>,
 }
@@ -71,6 +72,7 @@ impl WatchForm {
             min_profit,
             costs,
             include_suspicious: watch.include_suspicious,
+            ozon: watch.ozon,
             every_minutes: watch.every_minutes,
             problems: Vec::new(),
         }
@@ -215,6 +217,16 @@ impl WatchForm {
         });
         ui.end_row();
 
+        if self.source.has_delivery_and_seller() {
+            ui.label("Доставка и продавец");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.ozon.by_tomorrow, "Привезут не позже завтра");
+                ui.checkbox(&mut self.ozon.only_ozon, "Только Ozon");
+                ui.weak("рынок всё равно считается по всем продавцам");
+            });
+            ui.end_row();
+        }
+
         ui.label("Слишком дёшево");
         ui.vertical(|ui| {
             ui.checkbox(
@@ -335,6 +347,11 @@ impl WatchForm {
                 },
             },
             include_suspicious: self.include_suspicious,
+            ozon: if self.source.has_delivery_and_seller() {
+                self.ozon
+            } else {
+                OzonConditions::default()
+            },
             every_minutes: self.every_minutes,
             enabled: self.enabled,
         })
@@ -398,9 +415,29 @@ mod tests {
                 costs: 300,
             },
             include_suspicious: true,
+            ozon: OzonConditions::default(),
             every_minutes: 20,
             enabled: false,
         };
         assert_eq!(WatchForm::edit(&watch).to_watch(), Ok(watch));
+    }
+
+    #[test]
+    fn ozon_conditions_are_dropped_when_switched_to_avito() {
+        let fast_ozon = Watch {
+            name: "Наушники".into(),
+            query: "наушники sony".into(),
+            ozon: OzonConditions {
+                by_tomorrow: true,
+                only_ozon: true,
+            },
+            ..Watch::new_draft()
+        };
+        let mut form = WatchForm::edit(&fast_ozon);
+        assert_eq!(form.to_watch().unwrap().ozon, fast_ozon.ozon);
+
+        form.source = SourceKind::Avito;
+
+        assert_eq!(form.to_watch().unwrap().ozon, OzonConditions::default());
     }
 }

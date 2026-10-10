@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::geo::GeoPoint;
 use crate::hunt::category::Category;
 use crate::marketplace::{Area, SourceKind};
-use crate::search::{PriceRange, SearchRequest};
+use crate::search::{OzonConditions, PriceRange, SearchRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Goal {
@@ -33,6 +33,9 @@ pub struct Watch {
     /// По умолчанию такие не присылаются, но и не теряются: их число видно в статусе слежки.
     #[serde(default)]
     pub include_suspicious: bool,
+    /// «Доставка до завтра», «только Ozon» — только для Ozon: у Авито этих данных нет.
+    #[serde(default)]
+    pub ozon: OzonConditions,
     pub every_minutes: u32,
     pub enabled: bool,
 }
@@ -54,6 +57,7 @@ impl Watch {
                 min_discount_percent: 20,
             },
             include_suspicious: false,
+            ozon: OzonConditions::default(),
             every_minutes: 15,
             enabled: true,
         }
@@ -126,12 +130,14 @@ impl Watch {
         }
     }
 
-    /// Похожие товары, которые проходят ещё и ваши фильтры по цене, рейтингу и отзывам.
+    /// Похожие товары, которые проходят ещё и ваши фильтры по цене, рейтингу, отзывам, доставке и продавцу.
+    /// Рынок при этом считается по всем похожим: «только Ozon» не должно задирать рыночную цену.
     pub fn candidates_request(&self) -> SearchRequest {
         SearchRequest {
             price: self.price,
             min_rating: self.min_rating,
             min_reviews: self.min_reviews,
+            ozon: self.ozon,
             ..self.comparables_request()
         }
     }

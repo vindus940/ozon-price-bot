@@ -45,6 +45,11 @@ impl SourceKind {
     pub fn has_locations(self) -> bool {
         !self.radii_km().is_empty()
     }
+
+    /// Срок доставки и метку «Ozon» знает только маркетплейс: у объявлений Авито их нет.
+    pub fn has_delivery_and_seller(self) -> bool {
+        self == SourceKind::Ozon
+    }
 }
 
 /// Где искать: вокруг точки в радиусе. Площадки без адресов товаров его не учитывают.

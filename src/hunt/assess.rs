@@ -112,7 +112,7 @@ mod tests {
     use crate::hunt::fixtures::{iphone_watch, market_offers, phone};
     use crate::hunt::watch::Goal;
     use crate::marketplace::SourceKind;
-    use crate::search::PriceRange;
+    use crate::search::{OzonConditions, PriceRange};
 
     #[test]
     fn market_ignores_accessories_and_other_versions_and_your_price_filter() {
@@ -134,6 +134,32 @@ mod tests {
         assert_eq!(assessment.suitable.len(), 1);
         assert_eq!(assessment.suitable[0].offer.price, 55_000);
         assert_eq!(assessment.suitable[0].discount_percent, 23);
+    }
+
+    #[test]
+    fn only_ozon_picks_deals_but_market_counts_every_seller() {
+        let mut offers = market_offers();
+        offers.push(phone(55_000));
+        offers.push(Offer {
+            sold_by_ozon: true,
+            ..phone(58_000)
+        });
+        let ozon_only = Watch {
+            ozon: OzonConditions {
+                only_ozon: true,
+                ..OzonConditions::default()
+            },
+            ..iphone_watch()
+        };
+
+        let assessment = assess(&ozon_only, offers, Local::now());
+
+        assert_eq!(assessment.comparable, 8, "в рынке и сторонний продавец за 55 000 ₽");
+        assert_eq!(assessment.market, Some(MarketPrice::Whole(71_500)));
+        assert_eq!(
+            assessment.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [58_000]
+        );
     }
 
     #[test]

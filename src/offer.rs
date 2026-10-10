@@ -33,6 +33,15 @@ pub struct Offer {
 }
 
 impl Offer {
+    /// Привезут сегодня или завтра: «Сегодня», «Завтра», у экспресса — «За час», «За 2 часа».
+    /// Неизвестный срок условие не проходит, как и неизвестный рейтинг.
+    pub fn arrives_by_tomorrow(&self) -> bool {
+        self.delivery.as_deref().is_some_and(|when| {
+            let when = when.trim().to_lowercase();
+            when == "сегодня" || when == "завтра" || when.starts_with("за ")
+        })
+    }
+
     pub fn discount_percent(&self) -> Option<u64> {
         self.old_price
             .filter(|&old| old > self.price)
@@ -85,5 +94,22 @@ mod tests {
             .discount_percent(),
             None
         );
+    }
+
+    #[test]
+    fn today_tomorrow_and_express_arrive_by_tomorrow() {
+        let arriving = |when: Option<&str>| {
+            Offer {
+                delivery: when.map(Into::into),
+                ..Offer::sample("x", 100)
+            }
+            .arrives_by_tomorrow()
+        };
+        for when in ["Сегодня", "Завтра", "За час", "За 2 часа"] {
+            assert!(arriving(Some(when)), "{when}");
+        }
+        assert!(!arriving(Some("13 октября")));
+        assert!(!arriving(Some("Послезавтра")));
+        assert!(!arriving(None));
     }
 }

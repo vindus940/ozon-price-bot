@@ -123,6 +123,7 @@ fn conditions(watch: &Watch) -> String {
     if let Some(reviews) = watch.min_reviews {
         parts.push(format!("отзывов от {reviews}"));
     }
+    parts.extend(watch.ozon.labels().into_iter().map(String::from));
     if !watch.stop_words.is_empty() {
         parts.push(format!("без: {}", watch.stop_words.join(", ")));
     }

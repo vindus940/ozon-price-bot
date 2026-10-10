@@ -21,6 +21,9 @@ pub(super) const HELP: &str = "Напишите, что ищете, — приш
 Можно отсечь товары с низким рейтингом и без отзывов:
 <code>наушники sony рейтинг от 4.5 отзывов от 100</code>
 
+Только то, что привезут не позже завтра, и только от самого Ozon:
+<code>наушники sony доставка завтра только ozon</code>
+
 Продукты и химию честнее сравнивать по цене за килограмм, литр или штуку — пачка 400 г не будет «дешевле» мешка на 3 кг:
 <code>стиральный порошок за кг</code>
 <code>капсулы для стирки за шт</code>
@@ -218,6 +221,7 @@ fn conditions(request: &SearchRequest) -> String {
     ]
     .into_iter()
     .flatten()
+    .chain(request.ozon.labels().into_iter().map(String::from))
     .collect();
 
     if conditions.is_empty() {
@@ -615,11 +619,13 @@ mod tests {
             reviews: Some(8834),
             ..Offer::sample("Sony WH-CH520", 4364)
         };
-        let request = SearchRequest::parse("наушники sony до 5000 рейтинг от 4.5 отзывов от 100");
+        let request =
+            SearchRequest::parse("наушники sony до 5000 рейтинг от 4.5 отзывов от 100 доставка завтра только ozon");
         let text = super::findings(&request, &findings(vec![offer]), 10);
 
         assert!(text.starts_with(
-            "<b>наушники sony</b>, цена до 5\u{a0}000\u{a0}₽, рейтинг от 4.5, отзывов от 100\nПодходят 1 из 80"
+            "<b>наушники sony</b>, цена до 5\u{a0}000\u{a0}₽, рейтинг от 4.5, отзывов от 100, доставка до завтра, \
+             только Ozon\nПодходят 1 из 80"
         ));
     }
 

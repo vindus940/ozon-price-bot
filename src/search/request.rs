@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::offer::Offer;
 use crate::quantity::Unit;
 use crate::search::Order;
 
@@ -31,7 +32,41 @@ pub struct SearchRequest {
     /// это объём, но цена за литр чайника ничего не значит.
     pub per_unit: Option<Unit>,
     pub order: Order,
+    pub ozon: OzonConditions,
 }
+
+/// Условия, которые понимает только Ozon: у объявлений Авито нет ни срока доставки, ни продавца-маркетплейса.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OzonConditions {
+    /// «доставка завтра»: привезут не позже завтра.
+    pub by_tomorrow: bool,
+    /// «только Ozon»: продаёт сам маркетплейс, а не сторонний продавец.
+    pub only_ozon: bool,
+}
+
+impl OzonConditions {
+    pub fn accepts(self, offer: &Offer) -> bool {
+        (!self.by_tomorrow || offer.arrives_by_tomorrow()) && (!self.only_ozon || offer.sold_by_ozon)
+    }
+
+    /// Как условия звучат в заголовке ответа и в строке слежки.
+    pub fn labels(self) -> Vec<&'static str> {
+        [
+            self.by_tomorrow.then_some("доставка до завтра"),
+            self.only_ozon.then_some("только Ozon"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+/// «доставка завтра», «с доставкой сегодня», «доставка до завтра» — всё значит «не позже завтра».
+static BY_TOMORROW: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)(?:с\s+)?(доставк\w*\s+(?:до\s+)?(?:завтра|сегодня))(?:\s|$)").unwrap());
+
+static ONLY_OZON: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)(только\s+(?:ozon|озон\w*))(?:\s|$)").unwrap());
 
 static PER_UNIT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)за\s+(?:1\s*)?(кг|килограмм\w*|л|литр\w*|шт|штук\w*)\b").unwrap());
@@ -57,6 +92,8 @@ impl SearchRequest {
         let (min_rating, text) = cut(&RATING_BOUND, &text, |value| value.replace(',', ".").parse().ok());
         let (min_reviews, text) = cut(&REVIEWS_BOUND, &text, whole_number);
         let (order, text) = cut(&ORDER, &text, |words| Some(order(words)));
+        let (by_tomorrow, text) = cut(&BY_TOMORROW, &text, |_| Some(()));
+        let (only_ozon, text) = cut(&ONLY_OZON, &text, |_| Some(()));
         let (price, text) = cut_price(&text);
 
         let (excluded, included): (Vec<&str>, Vec<&str>) = text
@@ -71,6 +108,10 @@ impl SearchRequest {
             min_reviews,
             per_unit,
             order: order.unwrap_or_default(),
+            ozon: OzonConditions {
+                by_tomorrow: by_tomorrow.is_some(),
+                only_ozon: only_ozon.is_some(),
+            },
         }
     }
 }
@@ -221,6 +262,32 @@ mod tests {
             Some(Unit::Piece)
         );
         assert_eq!(SearchRequest::parse("игрушка подвес за лапку").per_unit, None);
+    }
+
+    #[test]
+    fn delivery_and_seller_conditions_are_cut_from_query() {
+        assert_eq!(
+            SearchRequest::parse("наушники sony доставка завтра только Ozon до 5000"),
+            SearchRequest {
+                ozon: OzonConditions {
+                    by_tomorrow: true,
+                    only_ozon: true,
+                },
+                ..request("наушники sony", &[], None, Some(5000))
+            }
+        );
+        for text in [
+            "чайник с доставкой сегодня",
+            "чайник доставка до завтра",
+            "чайник только озон",
+        ] {
+            assert_eq!(SearchRequest::parse(text).query, "чайник", "{text}");
+        }
+        let plain = SearchRequest::parse("доставка воды");
+        assert_eq!(
+            (plain.query.as_str(), plain.ozon),
+            ("доставка воды", OzonConditions::default())
+        );
     }
 
     #[test]

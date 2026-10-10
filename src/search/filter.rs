@@ -1,6 +1,6 @@
 use crate::offer::Offer;
 use crate::search::synonyms::spellings;
-use crate::search::{PriceRange, SearchRequest};
+use crate::search::{OzonConditions, PriceRange, SearchRequest};
 use crate::text::{normalize, words};
 
 pub struct OfferFilter {
@@ -9,6 +9,7 @@ pub struct OfferFilter {
     price: PriceRange,
     min_rating: Option<f32>,
     min_reviews: Option<u64>,
+    ozon: OzonConditions,
 }
 
 impl OfferFilter {
@@ -19,11 +20,15 @@ impl OfferFilter {
             price: request.price,
             min_rating: request.min_rating,
             min_reviews: request.min_reviews,
+            ozon: request.ozon,
         }
     }
 
     pub fn accepts(&self, offer: &Offer) -> bool {
-        self.price.contains(offer.price) && self.matches_words(&offer.name) && self.meets_quality(offer)
+        self.price.contains(offer.price)
+            && self.matches_words(&offer.name)
+            && self.meets_quality(offer)
+            && self.ozon.accepts(offer)
     }
 
     fn matches_words(&self, name: &str) -> bool {
@@ -80,6 +85,25 @@ mod tests {
             reviews,
             ..Offer::sample("Чайник электрический", 1500)
         }
+    }
+
+    #[test]
+    fn delivery_and_seller_conditions_keep_only_known_matches() {
+        let offer = |delivery: Option<&str>, sold_by_ozon: bool| Offer {
+            delivery: delivery.map(Into::into),
+            sold_by_ozon,
+            ..Offer::sample("Чайник электрический", 1_990)
+        };
+        let fast = filter("чайник доставка завтра");
+        assert!(fast.accepts(&offer(Some("Завтра"), false)));
+        assert!(!fast.accepts(&offer(Some("13 октября"), true)));
+        assert!(!fast.accepts(&offer(None, true)));
+
+        let ozon = filter("чайник только ozon");
+        assert!(ozon.accepts(&offer(None, true)));
+        assert!(!ozon.accepts(&offer(Some("Завтра"), false)));
+
+        assert!(filter("чайник").accepts(&offer(None, false)));
     }
 
     #[test]
