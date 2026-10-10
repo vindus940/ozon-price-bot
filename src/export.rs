@@ -1,7 +1,7 @@
 use crate::quantity::Unit;
 use crate::search::Finding;
 
-const HEADER: [&str; 8] = [
+const HEADER: [&str; 11] = [
     "№",
     "Название",
     "Цена",
@@ -9,6 +9,9 @@ const HEADER: [&str; 8] = [
     "Скидка %",
     "Рейтинг",
     "Отзывов",
+    "Доставка",
+    "Продаёт Ozon",
+    "Бренд проверен",
     "Ссылка",
 ];
 /// Колонка цены за единицу встаёт сразу за ценой — и только если сравнивали за единицу.
@@ -44,6 +47,9 @@ fn cells(number: usize, found: &Finding, with_unit_price: bool) -> Vec<String> {
             .map(|rating| rating.to_string().replace('.', ","))
             .unwrap_or_default(),
         optional(offer.reviews),
+        offer.delivery.clone().unwrap_or_default(),
+        yes(offer.sold_by_ozon),
+        yes(offer.brand_verified),
         offer.url.clone(),
     ];
     if with_unit_price {
@@ -54,6 +60,11 @@ fn cells(number: usize, found: &Finding, with_unit_price: bool) -> Vec<String> {
         cells.insert(UNIT_PRICE_COLUMN, rubles.unwrap_or_default());
     }
     cells
+}
+
+/// «да» или пусто: так в Excel фильтр по колонке показывает ровно два значения.
+fn yes(flag: bool) -> String {
+    if flag { "да".into() } else { String::new() }
 }
 
 fn row(cells: &[String]) -> String {
@@ -80,6 +91,8 @@ mod tests {
             old_price: Some(7990),
             rating: Some(4.9),
             reviews: Some(8834),
+            delivery: Some("Завтра".into()),
+            sold_by_ozon: true,
             ..Offer::sample("Наушники \"Sony\"", 4364)
         };
         let text = String::from_utf8(csv(&[found(offer, None)], None)).unwrap();
@@ -87,7 +100,8 @@ mod tests {
         assert!(text.starts_with("\u{feff}\"№\";\"Название\";\"Цена\";\"Старая цена\""));
         assert!(text.ends_with("\r\n"));
         assert!(text.contains(
-            "\"1\";\"Наушники \"\"Sony\"\"\";\"4364\";\"7990\";\"45\";\"4,9\";\"8834\";\"https://example.com/1\""
+            "\"1\";\"Наушники \"\"Sony\"\"\";\"4364\";\"7990\";\"45\";\"4,9\";\"8834\";\"Завтра\";\"да\";\"\";\
+             \"https://example.com/1\""
         ));
     }
 

@@ -178,6 +178,9 @@ mod tests {
                 reviews: Some(8_946),
                 url: "https://www.ozon.ru/product/sony-wh-ch520-naushniki-nakladnye-besprovodnye-chernye-895366703/"
                     .into(),
+                delivery: Some("Завтра".into()),
+                sold_by_ozon: true,
+                brand_verified: true,
                 ..Offer::sample("Sony WH-CH520 Наушники накладные беспроводные, черные", 3_870)
             }
         );
@@ -188,6 +191,11 @@ mod tests {
                 && offer.url.starts_with("https://www.ozon.ru/product/")
                 && !offer.url.contains('?')
         }));
+        assert_eq!(
+            portion.offers[1].delivery.as_deref(),
+            Some("За час"),
+            "у экспресса своя кнопка корзины"
+        );
         assert!(portion.next.is_some_and(|path| path.contains("page=2")));
     }
 
@@ -239,6 +247,10 @@ mod tests {
                 .all(|o| !o.name.is_empty() && o.price > 0 && o.url.starts_with("https://www.ozon.ru/product/"))
         );
         assert!(offers.iter().any(|o| o.rating.is_some() && o.reviews.is_some()));
+        assert!(
+            offers.iter().any(|o| o.delivery.is_some()),
+            "пропал срок доставки с плиток"
+        );
         println!(
             "собрано {}, первое: {} ₽ {}",
             offers.len(),

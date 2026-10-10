@@ -21,6 +21,15 @@ pub struct Offer {
     /// Текст карточки целиком: в нём продавцы пишут «аналог», «не работает» и прочее, чего нет в заголовке.
     #[serde(default)]
     pub description: Option<String>,
+    /// Когда привезут, как пишет площадка: «Завтра», «8 октября», «За час».
+    #[serde(default)]
+    pub delivery: Option<String>,
+    /// На плитке Ozon стоит метка «Ozon»: товар продаёт сам маркетплейс, а не сторонний продавец.
+    #[serde(default)]
+    pub sold_by_ozon: bool,
+    /// Отметка «Бренд проверен»: Ozon проверил, что продавец вправе торговать этим брендом.
+    #[serde(default)]
+    pub brand_verified: bool,
 }
 
 impl Offer {
@@ -45,6 +54,9 @@ impl Offer {
             distance_km: None,
             posted: None,
             description: None,
+            delivery: None,
+            sold_by_ozon: false,
+            brand_verified: false,
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::format::{rub, signed_rub};
+use crate::format::{rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
 use crate::hunt::{Alert, Deal, Goal, Watch};
 use crate::marketplace::SourceError;
@@ -201,8 +201,9 @@ fn offer_entry(place: usize, found: &Finding) -> String {
         (Some(rating), None) => format!("\n★ {rating}"),
         _ => String::new(),
     };
+    let marks = marks_line(offer);
     format!(
-        "\n{place}. <b>{price}</b>{unit_price}{discount}\n<a href=\"{url}\">{name}</a>{rating}\n",
+        "\n{place}. <b>{price}</b>{unit_price}{discount}\n<a href=\"{url}\">{name}</a>{rating}{marks}\n",
         price = rub(offer.price),
         url = escape(&offer.url),
         name = escape(&shorten(&offer.name, NAME_LIMIT)),
@@ -313,6 +314,7 @@ fn deal_entry(deal: &Deal) -> String {
     } else {
         format!("\n📍 {}", escape(&whereabouts))
     };
+    let marks = marks_line(&deal.offer);
     let warning = if deal.suspicious {
         "\n⚠️ Дешевле половины рынка — проверьте продавца и состояние"
     } else {
@@ -324,13 +326,23 @@ fn deal_entry(deal: &Deal) -> String {
         None => (String::new(), rub(deal.market_price)),
     };
     format!(
-        "\n\n<b>{price}</b>{unit_price} — на {discount}% ниже рынка ({market}, по {sample} похожим){resale}{whereabouts}{warning}\n<a href=\"{url}\">{name}</a>",
+        "\n\n<b>{price}</b>{unit_price} — на {discount}% ниже рынка ({market}, по {sample} похожим){resale}{whereabouts}{marks}{warning}\n<a href=\"{url}\">{name}</a>",
         price = rub(deal.offer.price),
         discount = deal.discount_percent,
         sample = deal.market_sample,
         url = escape(&deal.offer.url),
         name = escape(&shorten(&deal.offer.name, NAME_LIMIT)),
     )
+}
+
+/// Отдельной строкой под предложением, если с плитки что-то известно.
+fn marks_line(offer: &Offer) -> String {
+    let marks = tile_marks(offer);
+    if marks.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", escape(&marks))
+    }
 }
 
 /// «2.4 км от дома · Валовая ул. Павелецкая · 1 час назад» — что известно о месте и времени.
@@ -575,11 +587,13 @@ mod tests {
     }
 
     #[test]
-    fn shows_price_discount_and_escaped_name() {
+    fn shows_price_discount_rating_marks_and_escaped_name() {
         let offer = Offer {
             old_price: Some(7990),
             rating: Some(4.9),
             reviews: Some(8834),
+            delivery: Some("Завтра".into()),
+            sold_by_ozon: true,
             ..Offer::sample("Sony <WH-CH520>", 4364)
         };
         let text = super::findings(
@@ -591,7 +605,7 @@ mod tests {
         assert!(text.starts_with("<b>наушники sony</b>, цена до 5\u{a0}000\u{a0}₽\nПодходят 1 из 80"));
         assert!(text.contains("<b>4\u{a0}364\u{a0}₽</b> <s>7\u{a0}990\u{a0}₽</s> −45%"));
         assert!(text.contains(">Sony &lt;WH-CH520&gt;</a>"));
-        assert!(text.contains("★ 4.9 · отзывов: 8834"));
+        assert!(text.contains("★ 4.9 · отзывов: 8834\nдоставка завтра · продаёт Ozon\n"));
     }
 
     #[test]

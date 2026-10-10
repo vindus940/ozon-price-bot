@@ -1,3 +1,5 @@
+use crate::offer::Offer;
+
 /// Сумма в рублях с разбивкой на тысячи: 72500 → «72 500 ₽» (с неразрывными пробелами).
 pub fn rub(amount: u64) -> String {
     let digits = amount.to_string();
@@ -20,6 +22,21 @@ pub fn signed_rub(amount: i64) -> String {
     }
 }
 
+/// Что ещё известно о предложении с плитки: «доставка завтра · продаёт Ozon · бренд проверен». Пусто, если ничего.
+pub fn tile_marks(offer: &Offer) -> String {
+    let delivery = offer
+        .delivery
+        .as_ref()
+        .map(|when| format!("доставка {}", when.to_lowercase()));
+    let seller = offer.sold_by_ozon.then(|| "продаёт Ozon".to_string());
+    let brand = offer.brand_verified.then(|| "бренд проверен".to_string());
+    [delivery, seller, brand]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,5 +47,17 @@ mod tests {
         assert_eq!(rub(1990), "1\u{a0}990\u{a0}₽");
         assert_eq!(rub(1_234_567), "1\u{a0}234\u{a0}567\u{a0}₽");
         assert_eq!(signed_rub(-1500), "−1\u{a0}500\u{a0}₽");
+    }
+
+    #[test]
+    fn tile_marks_read_as_one_line_and_skip_the_unknown() {
+        let ozon = Offer {
+            delivery: Some("Завтра".into()),
+            sold_by_ozon: true,
+            brand_verified: true,
+            ..Offer::sample("Наушники", 3_870)
+        };
+        assert_eq!(tile_marks(&ozon), "доставка завтра · продаёт Ozon · бренд проверен");
+        assert_eq!(tile_marks(&Offer::sample("Шуруповерт с Авито", 3_000)), "");
     }
 }

@@ -1,7 +1,7 @@
 use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD};
-use crate::format::{rub, signed_rub};
+use crate::format::{rub, signed_rub, tile_marks};
 use crate::hunt::{Deal, Hunter};
 
 pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, filter: &mut Option<u64>, confirm_clear: &mut bool) {
@@ -100,6 +100,10 @@ fn card(ui: &mut egui::Ui, deal: &Deal) {
         }
         if let Some(reviews) = deal.offer.reviews {
             details.push(format!("отзывов {reviews}"));
+        }
+        let marks = tile_marks(&deal.offer);
+        if !marks.is_empty() {
+            details.push(marks);
         }
         ui.weak(details.join(" · "));
     });

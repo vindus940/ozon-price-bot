@@ -197,6 +197,9 @@ impl Card {
             distance_km,
             posted: self.posted,
             description: self.text,
+            delivery: None,
+            sold_by_ozon: false,
+            brand_verified: false,
         })
     }
 }

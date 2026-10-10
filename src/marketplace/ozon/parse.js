@@ -67,6 +67,17 @@
     };
   };
 
+  // Срок доставки — подпись кнопки корзины: «Завтра», «8 октября», у экспресса — «За час».
+  const deliveryOf = nodes => nodes
+    .filter(node => /AddToCart$/.test(node.common?.testInfo?.automatizationId || '') && typeof node.title === 'string')
+    .map(node => clean(node.title))
+    .find(Boolean) ?? null;
+
+  // Метка «Ozon» в строке рейтинга выделена фирменным цветом — по нему, а не по слову, которое может быть и в названии.
+  const soldByOzon = nodes => nodes.some(node => node.textColor === 'textOzon');
+
+  // Служебная метка advert стоит у всех карточек выдачи, поэтому рекламу по ней не отличить — её не читаем.
+
   // Ссылка без хвоста «?at=...»: иначе один товар из разных порций задваивался бы.
   const productUrl = (link, origin) => (/^https?:/.test(link) ? link : origin + link).replace(/[?#].*$/, '');
 
@@ -83,6 +94,9 @@
       old_price: oldPrice,
       ...ratingOf(nodes, texts),
       url: productUrl(link, origin),
+      delivery: deliveryOf(nodes),
+      sold_by_ozon: soldByOzon(nodes),
+      brand_verified: texts.includes('Бренд проверен'),
     };
   };
 
