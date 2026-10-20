@@ -28,6 +28,7 @@ pub(super) struct WatchForm {
     source: SourceKind,
     category: Category,
     query: String,
+    link: String,
     price_min: String,
     price_max: String,
     stop_words: String,
@@ -63,6 +64,7 @@ impl WatchForm {
             source: watch.source,
             category: watch.category,
             query: watch.query.clone(),
+            link: watch.link.clone().unwrap_or_default(),
             price_min: number(watch.price.min),
             price_max: number(watch.price.max),
             stop_words: watch.stop_words.join(", "),
@@ -194,6 +196,21 @@ impl WatchForm {
     fn what_we_look_for(&mut self, ui: &mut egui::Ui) {
         ui.label("Что ищем");
         field(ui, &mut self.query, "например: iphone 15 128");
+        ui.end_row();
+
+        ui.label("Ссылка на выдачу");
+        ui.vertical(|ui| {
+            field(
+                ui,
+                &mut self.link,
+                &format!("необязательно: https://{}/…", self.source.site()),
+            );
+            ui.weak(
+                "Настройте фильтры на самом сайте в окне браузера программы (у Авито — «Состояние: новое») \
+                 и вставьте адрес из строки браузера. Слова выше по-прежнему решают, что считать тем же товаром. \
+                 Фильтры ссылки сужают и рынок — цену, рейтинг и доставку лучше задавать полями ниже.",
+            );
+        });
         ui.end_row();
 
         ui.label("Категория");
@@ -356,6 +373,7 @@ impl WatchForm {
             source: self.source,
             category: self.category,
             query: self.query.trim().to_string(),
+            link: Some(self.link.trim().to_string()).filter(|link| !link.is_empty()),
             price,
             stop_words: self
                 .stop_words
@@ -432,6 +450,7 @@ mod tests {
             source: SourceKind::Avito,
             category: Category::Tools,
             query: "шуруповерт makita".into(),
+            link: Some("https://www.avito.ru/moskva/instrumenty?f=ASgBAgICAUT4vA2W0jQ".into()),
             price: PriceRange {
                 min: Some(1_000),
                 max: Some(8_000),

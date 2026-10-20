@@ -21,6 +21,10 @@ pub struct Watch {
     pub source: SourceKind,
     pub category: Category,
     pub query: String,
+    /// Ссылка на выдачу с фильтрами, настроенными на самом сайте. Ищется по ней, а слова `query` по-прежнему
+    /// решают, что считать тем же товаром. Её фильтры сужают и рынок: он считается по тому, что показывает ссылка.
+    #[serde(default)]
+    pub link: Option<String>,
     pub price: PriceRange,
     pub stop_words: Vec<String>,
     pub min_rating: Option<f32>,
@@ -53,6 +57,7 @@ impl Watch {
             source: SourceKind::Ozon,
             category: Category::Any,
             query: String::new(),
+            link: None,
             price: PriceRange::default(),
             stop_words: Vec::new(),
             min_rating: None,
@@ -77,6 +82,9 @@ impl Watch {
         }
         if self.query.trim().is_empty() {
             problems.push("Напишите, что искать".to_string());
+        }
+        if let Some(Err(problem)) = self.link.as_deref().map(|link| self.source.parse_link(link)) {
+            problems.push(problem);
         }
         if let (Some(min), Some(max)) = (self.price.min, self.price.max)
             && min > max
@@ -200,6 +208,33 @@ mod tests {
             ..watch()
         };
         assert_eq!(broken.problems(true).len(), 4);
+    }
+
+    #[test]
+    fn link_must_lead_to_the_watch_source() {
+        let by_link = |link: &str| Watch {
+            link: Some(link.into()),
+            ..watch()
+        };
+        assert!(
+            by_link("https://www.ozon.ru/category/audiotehnika-15543/?brand=32686750")
+                .problems(false)
+                .is_empty()
+        );
+        assert_eq!(
+            by_link("https://www.avito.ru/moskva?q=iphone").problems(false),
+            ["Ссылка должна вести на www.ozon.ru, а эта ведёт на www.avito.ru"]
+        );
+    }
+
+    #[test]
+    fn watches_saved_before_links_have_none() {
+        let mut saved = serde_json::to_value(watch()).unwrap();
+        saved.as_object_mut().unwrap().remove("link");
+
+        let read: Watch = serde_json::from_value(saved).unwrap();
+
+        assert_eq!(read.link, None);
     }
 
     #[test]

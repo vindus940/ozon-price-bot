@@ -30,7 +30,9 @@
     })
     .filter(Boolean);
 
-  const loaded = document.readyState === 'complete';
+  // «complete» на Авито наступает не всегда: на выдаче по ссылке с фильтрами часть картинок так и не догружается.
+  // Объявления приходят в самой разметке, поэтому разобранная страница уже готова.
+  const loaded = document.readyState !== 'loading';
   const state = !loaded ? 'loading'
     : captcha ? 'captcha'
     : notFound ? 'not_found'

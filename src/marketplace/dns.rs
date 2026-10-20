@@ -72,6 +72,14 @@ impl OfferSource for Dns {
         }
         page.into_offers()
     }
+
+    /// Фильтры ДНС хранит в самом адресе каталога (бренд — частью пути подборки), поэтому ссылка открывается как есть.
+    async fn search_link(&self, link: &Url, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+        let _exclusive = self.tab_in_use.lock().await;
+        let tab = self.browser.tab(HOME).await?;
+        let page: Page = page::open(&tab, link.as_str(), READ_SCRIPT, NOT_FOUND).await?;
+        page.into_offers()
+    }
 }
 
 impl ScriptPage for Page {
@@ -266,6 +274,24 @@ mod live {
             offers[0].price,
             offers[0].name,
             offers[0].delivery
+        );
+    }
+
+    /// Подборка «наушники Sony» — в неё ДНС сам переводит такой поиск; бренд в ней — часть пути.
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой ДНС: cargo test -- --ignored --test-threads=1"]
+    async fn finds_offers_by_catalog_link_on_live_site() {
+        let dns = Dns::new(test_browser());
+        let link = crate::marketplace::SourceKind::Dns
+            .parse_link("https://www.dns-shop.ru/catalog/recipe/422f8a94ba41d693/sony/")
+            .unwrap();
+
+        let offers = dns.search_link(&link, None).await.unwrap();
+
+        assert!(offers.len() >= 10, "собрано всего {}", offers.len());
+        assert!(
+            offers.iter().all(|offer| offer.name.to_lowercase().contains("sony")),
+            "в подборке Sony оказались другие бренды"
         );
     }
 }

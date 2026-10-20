@@ -108,6 +108,9 @@ fn goal_summary(goal: Goal) -> String {
 
 fn conditions(watch: &Watch) -> String {
     let mut parts = vec![format!("ищу «{}»", watch.query)];
+    if watch.link.is_some() {
+        parts.push("по ссылке с фильтрами сайта".into());
+    }
     if let Some(radius) = watch.radius_km {
         parts.push(format!("до {radius} км от дома"));
     }
@@ -259,6 +262,11 @@ mod tests {
             "ищу «шуруповерт makita» · до 5 км от дома · цена до 8\u{a0}000\u{a0}₽ · рейтинг от 4.5 · \
              без: тушка, без акб · каждые 15 мин"
         );
+        let by_link = Watch {
+            link: Some("https://www.avito.ru/moskva/instrumenty?f=ASgBAgICAUT4vA2W0jQ".into()),
+            ..drill()
+        };
+        assert!(conditions(&by_link).starts_with("ищу «шуруповерт makita» · по ссылке с фильтрами сайта · "));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use reqwest::Url;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -59,9 +60,27 @@ impl Ozon {
         }
     }
 
-    fn scan_expression(&self, query: &str) -> anyhow::Result<String> {
+    /// `start` — путь выдачи из ссылки слежки; без него поиск по словам.
+    fn scan_expression(&self, query: &str, start: Option<&str>) -> anyhow::Result<String> {
         let query = serde_json::to_string(query).context("не удалось подготовить запрос")?;
-        Ok(format!("({SCAN_SCRIPT})({query}, {}, {PARSE_SCRIPT})", self.portions))
+        let start = serde_json::to_string(&start).context("не удалось подготовить ссылку")?;
+        Ok(format!(
+            "({SCAN_SCRIPT})({query}, {}, {PARSE_SCRIPT}, {start})",
+            self.portions
+        ))
+    }
+
+    async fn scan(&self, expression: &str) -> Result<Vec<Offer>, SourceError> {
+        let _exclusive = self.tab_in_use.lock().await;
+        let tab = self.ready_tab().await?;
+        let scan: ScanResult = timeout(SCAN_TIMEOUT, tab.evaluate(expression))
+            .await
+            .map_err(|_| anyhow!("Ozon не ответил за {} секунд", SCAN_TIMEOUT.as_secs()))??;
+
+        if scan.captcha && scan.offers.is_empty() {
+            return Err(SourceError::Captcha);
+        }
+        Ok(scan.offers)
     }
 }
 
@@ -72,16 +91,16 @@ impl OfferSource for Ozon {
     }
 
     async fn search(&self, query: &str, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
-        let _exclusive = self.tab_in_use.lock().await;
-        let tab = self.ready_tab().await?;
-        let scan: ScanResult = timeout(SCAN_TIMEOUT, tab.evaluate(&self.scan_expression(query)?))
-            .await
-            .map_err(|_| anyhow!("Ozon не ответил за {} секунд", SCAN_TIMEOUT.as_secs()))??;
+        self.scan(&self.scan_expression(query, None)?).await
+    }
 
-        if scan.captcha && scan.offers.is_empty() {
-            return Err(SourceError::Captcha);
-        }
-        Ok(scan.offers)
+    /// Ozon отдаёт выдачу по любому её адресу тем же запросом из вкладки, поэтому ссылка — это просто другой путь.
+    async fn search_link(&self, link: &Url, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+        let path = match link.query() {
+            Some(query) => format!("{}?{query}", link.path()),
+            None => link.path().to_string(),
+        };
+        self.scan(&self.scan_expression("", Some(&path))?).await
     }
 }
 
@@ -93,6 +112,7 @@ async fn page_is_ready(tab: &Tab) -> bool {
 mod tests {
     use super::*;
     use crate::browser::test_browser;
+    use crate::marketplace::SourceKind;
 
     const SAMPLE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ozon-portion.json");
 
@@ -256,6 +276,35 @@ mod tests {
             offers.len(),
             offers[0].price,
             offers[0].name
+        );
+    }
+
+    /// Ссылка с фильтрами «бренд Xiaomi» (номер бренда на Ozon) и «доставка завтра»: без фильтров Xiaomi среди
+    /// наушников меньшинство, так что тест падает, если фильтры ссылки потеряются — на первой порции или при листании.
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1"]
+    async fn finds_offers_by_filtered_link_on_live_site() {
+        let ozon = Ozon::new(test_browser(), 2);
+        let link = SourceKind::Ozon
+            .parse_link("https://www.ozon.ru/category/audiotehnika-15543/?text=наушники&brand=32686750&delivery=2")
+            .unwrap();
+
+        let offers = ozon.search_link(&link, None).await.unwrap();
+
+        assert!(
+            offers.len() > 8,
+            "собрано всего {} — вторая порция не пришла",
+            offers.len()
+        );
+        let foreign: Vec<&str> = offers
+            .iter()
+            .filter(|o| !o.name.to_lowercase().contains("xiaomi") && !o.name.to_lowercase().contains("redmi"))
+            .map(|o| o.name.as_str())
+            .collect();
+        assert!(foreign.is_empty(), "фильтр бренда потерялся: {foreign:?}");
+        assert!(
+            offers.iter().all(Offer::arrives_by_tomorrow),
+            "фильтр доставки потерялся"
         );
     }
 }

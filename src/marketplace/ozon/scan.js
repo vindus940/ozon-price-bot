@@ -1,5 +1,6 @@
-async (query, portions, parse) => {
+async (query, portions, parse, start) => {
   // Скачивает порции выдачи и отдаёт их разбору (parse.js) — сам карточки не разбирает.
+  // start — адрес выдачи с фильтрами из ссылки слежки; без него ищем по словам query.
   const PAUSE_BETWEEN_PORTIONS_MS = 300;
   const MAX_REDIRECTS = 3;
 
@@ -38,7 +39,11 @@ async (query, portions, parse) => {
     return fetchPortionHtml(path).catch(() => ({ items: [], next: null }));
   };
 
-  const searchPath = page => '/search/?text=' + encodeURIComponent(query) + (page > 1 ? '&page=' + page : '');
+  // Фильтры ссылки Ozon сам переносит в путь следующей порции; номер страницы — запасной путь, если листалки нет.
+  const searchPath = page => {
+    const first = start || '/search/?text=' + encodeURIComponent(query);
+    return page > 1 ? first + (first.includes('?') ? '&' : '?') + 'page=' + page : first;
+  };
 
   const offers = new Map();
   let path = searchPath(1);

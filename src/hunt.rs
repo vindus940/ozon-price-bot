@@ -341,10 +341,12 @@ impl Hunter {
         if watch.radius_km.is_some() && home.is_none() {
             return Err("не указан дом — укажите его координаты в «Настройках»".into());
         }
-        source
-            .search(&watch.query, watch.search_area(home))
-            .await
-            .map_err(|error| failure_reason(watch.source.title(), &error))
+        let area = watch.search_area(home);
+        let found = match watch.link.as_deref() {
+            Some(link) => source.search_link(&watch.source.parse_link(link)?, area).await,
+            None => source.search(&watch.query, area).await,
+        };
+        found.map_err(|error| failure_reason(watch.source.title(), &error))
     }
 
     /// Сверяет находки с памятью и запоминает их. `None` — слежку успели изменить или удалить, пока шла проверка.
@@ -463,6 +465,7 @@ mod tests {
     struct ChangingSource {
         offers: StdMutex<Vec<Offer>>,
         captcha: AtomicBool,
+        links: StdMutex<Vec<String>>,
     }
 
     impl ChangingSource {
@@ -485,6 +488,11 @@ mod tests {
                 return Err(SourceError::Captcha);
             }
             Ok(self.offers.lock().unwrap().clone())
+        }
+
+        async fn search_link(&self, link: &reqwest::Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+            self.links.lock().unwrap().push(link.to_string());
+            self.search("", area).await
         }
     }
 
@@ -749,6 +757,35 @@ mod tests {
         assert!(
             !storage.dir().join(feed::FILE).exists() && !storage.dir().join(memory::FILE).exists(),
             "и ничего не записывает"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_with_link_searches_by_it_and_judges_by_its_words() {
+        let mut offers = market_offers();
+        offers.push(phone(58_000));
+        let source = ChangingSource::with(offers);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("link");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let link = "https://ozon.ru/category/smartfony-15502/apple-26303000/?delivery=2";
+        let id = hunter
+            .save_watch(Watch {
+                link: Some(link.into()),
+                ..iphone_watch()
+            })
+            .unwrap();
+
+        hunter.check(id).await;
+
+        assert_eq!(
+            *source.links.lock().unwrap(),
+            ["https://www.ozon.ru/category/smartfony-15502/apple-26303000/?delivery=2"]
+        );
+        assert_eq!(
+            hunter.deals().iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [58_000],
+            "чехол и Pro отсеяны словами слежки, как и без ссылки"
         );
     }
 

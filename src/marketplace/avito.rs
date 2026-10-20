@@ -108,6 +108,22 @@ impl OfferSource for Avito {
         }
         page.into_offers()
     }
+
+    async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+        let _one_search_per_tab = self.category_paths.lock().await;
+        let tab = self.browser.tab(HOME).await?;
+        let page = open(&tab, link_url(link, area).as_str()).await?;
+        if let Some(area) = area
+            && !page.has_radius(area)
+        {
+            return Err(anyhow!(
+                "Авито не принял радиус {} км для этой ссылки — откройте её в браузере программы и проверьте город",
+                area.radius_km
+            )
+            .into());
+        }
+        page.into_offers()
+    }
 }
 
 impl Page {
@@ -144,6 +160,34 @@ fn search_url(path: &str, query: &str, area: Option<Area>) -> anyhow::Result<Url
     url.query_pairs_mut()
         .append_pair("q", query)
         .append_pair("s", NEWEST_FIRST);
+    add_area(&mut url, area);
+    Ok(url)
+}
+
+/// Фильтры, выбранные на сайте, Авито хранит в параметре `f` ссылки, и переход их не теряет. Сортировку и радиус
+/// программа ставит свои: проверяются свежие объявления в радиусе слежки. `context` и `localPriority` Авито
+/// добавляет к адресу сам, на фильтры они не влияют.
+fn link_url(link: &Url, area: Option<Area>) -> Url {
+    let kept: Vec<(String, String)> = link
+        .query_pairs()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_ref(),
+                "s" | "geoCoords" | "radius" | "searchRadius" | "context" | "localPriority"
+            )
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let mut url = link.clone();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(&kept)
+        .append_pair("s", NEWEST_FIRST);
+    add_area(&mut url, area);
+    url
+}
+
+fn add_area(url: &mut Url, area: Option<Area>) {
     if let Some(area) = area {
         let radius = area.radius_km.to_string();
         url.query_pairs_mut()
@@ -151,7 +195,6 @@ fn search_url(path: &str, query: &str, area: Option<Area>) -> anyhow::Result<Url
             .append_pair("radius", &radius)
             .append_pair("searchRadius", &radius);
     }
-    Ok(url)
 }
 
 /// Переходит по адресу и ждёт, пока новая страница покажет объявления, «ничего не найдено», проверку или 404.
@@ -337,6 +380,33 @@ mod tests {
              &geoCoords=55.751244%2C37.618423&radius=25&searchRadius=25"
         );
         assert!(!search_url(path, "дрель", None).unwrap().as_str().contains("geoCoords"));
+    }
+
+    #[test]
+    fn link_keeps_site_filters_but_gets_newest_first_and_watch_radius() {
+        let link = Url::parse(
+            "https://www.avito.ru/moskva/bytovaya_elektronika?context=H4sIAAAA&f=ASgBAgICAUT4vA2W0jQ\
+             &localPriority=0&q=logitech+g435&s=1&radius=50&searchRadius=50",
+        )
+        .unwrap();
+        let near = Area {
+            center: GeoPoint {
+                lat: 55.751_244,
+                lon: 37.618_423,
+            },
+            radius_km: 5,
+        };
+
+        assert_eq!(
+            link_url(&link, Some(near)).as_str(),
+            "https://www.avito.ru/moskva/bytovaya_elektronika?f=ASgBAgICAUT4vA2W0jQ&q=logitech+g435&s=104\
+             &geoCoords=55.751244%2C37.618423&radius=5&searchRadius=5"
+        );
+        assert_eq!(
+            link_url(&link, None).as_str(),
+            "https://www.avito.ru/moskva/bytovaya_elektronika?f=ASgBAgICAUT4vA2W0jQ&q=logitech+g435&s=104",
+            "без радиуса в слежке и радиус ссылки не нужен: рынок считается по всему городу"
+        );
     }
 
     #[tokio::test]
