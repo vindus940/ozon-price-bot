@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use chrono::{DateTime, Local};
 
 use crate::hunt::category::looks_used;
-use crate::hunt::deal::{Deal, evaluate};
+use crate::hunt::deal::{Deal, evaluate, within_radius};
 use crate::hunt::market::{Market, MarketPrice, Pricing};
 use crate::hunt::watch::Watch;
 use crate::offer::Offer;
 use crate::search::OfferFilter;
 
 /// Результат одной проверки, ещё не сверенный с памятью об отправленном.
+#[derive(Debug, Clone)]
 pub struct Assessment {
     pub scanned: usize,
     pub comparable: usize,
@@ -17,16 +18,38 @@ pub struct Assessment {
     /// Выгодные: сначала с наибольшей выгодой перепродажи, потом с наибольшей скидкой.
     pub suitable: Vec<Deal>,
     pub hidden_suspicious: usize,
+    pub sifted: Sifted,
+}
+
+/// Почему найденное не стало выгодным — чтобы при настройке слежки было видно, что её сужает.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sifted {
+    /// Нет слов запроса или есть стоп-слово.
+    pub other_words: usize,
+    /// Аксессуары, другие версии модели, брак и подделки.
+    pub other_product: usize,
+    /// Б/у при «только новые».
+    pub used: usize,
+    /// Повторы одного объявления: та же цена, то же место.
+    pub copies: usize,
+    /// Расходники без фасовки или в другой единице.
+    pub no_unit_price: usize,
+    /// Похожие, но не проходят ваши фильтры: цена, рейтинг, отзывы, доставка, продавец.
+    pub filters: usize,
+    pub beyond_radius: usize,
+    /// Похожие, но не дотянули до нужной скидки или выгоды.
+    pub not_cheap_enough: usize,
 }
 
 impl Assessment {
-    fn without_market(scanned: usize, comparable: usize) -> Self {
+    fn without_market(scanned: usize, comparable: usize, sifted: Sifted) -> Self {
         Self {
             scanned,
             comparable,
             market: None,
             suitable: Vec::new(),
             hidden_suspicious: 0,
+            sifted,
         }
     }
 }
@@ -35,45 +58,74 @@ impl Assessment {
 /// что проходят ваши фильтры: иначе фильтр «до 60 000 ₽» занижал бы и саму рыночную цену.
 pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assessment {
     let scanned = offers.len();
+    let mut sifted = Sifted::default();
     let similar = OfferFilter::new(&watch.comparables_request());
-    let comparables = without_copies(offers.into_iter().filter(|offer| {
-        similar.accepts(offer) && watch.category.accepts(&watch.query, offer) && !(watch.new_only && looks_used(offer))
-    }));
+    let mut same_product = Vec::new();
+    for offer in offers {
+        if !similar.accepts(&offer) {
+            sifted.other_words += 1;
+        } else if !watch.category.accepts(&watch.query, &offer) {
+            sifted.other_product += 1;
+        } else if watch.new_only && looks_used(&offer) {
+            sifted.used += 1;
+        } else {
+            same_product.push(offer);
+        }
+    }
+    let before_copies = same_product.len();
+    let comparables = without_copies(same_product.into_iter());
+    sifted.copies = before_copies - comparables.len();
+
     let Some(pricing) = Pricing::for_offers(watch.category, &comparables) else {
-        return Assessment::without_market(scanned, 0);
+        sifted.no_unit_price = comparables.len();
+        return Assessment::without_market(scanned, 0, sifted);
     };
     let (comparables, prices): (Vec<Offer>, Vec<u64>) = comparables
         .into_iter()
         .filter_map(|offer| {
-            let price = pricing.comparable_price(&offer)?;
+            let Some(price) = pricing.comparable_price(&offer) else {
+                sifted.no_unit_price += 1;
+                return None;
+            };
             Some((offer, price))
         })
         .unzip();
     let comparable = comparables.len();
     let Some(market) = Market::of(&prices) else {
-        return Assessment::without_market(scanned, comparable);
+        return Assessment::without_market(scanned, comparable, sifted);
     };
 
     let wanted = OfferFilter::new(&watch.candidates_request());
-    let (suspicious, mut suitable): (Vec<Deal>, Vec<Deal>) = comparables
+    let mut deals = Vec::new();
+    for offer in comparables {
+        if !wanted.accepts(&offer) {
+            sifted.filters += 1;
+            continue;
+        }
+        if !within_radius(watch.radius_km, &offer) {
+            sifted.beyond_radius += 1;
+            continue;
+        }
+        let (offer_market, per_unit) = pricing.market_for(market, &offer);
+        let Some(verdict) = evaluate(watch.goal, watch.radius_km, offer_market, &offer) else {
+            sifted.not_cheap_enough += 1;
+            continue;
+        };
+        deals.push(Deal {
+            watch_id: watch.id,
+            watch_name: watch.name.clone(),
+            found_at: now,
+            offer,
+            market_price: offer_market.median,
+            market_sample: market.sample,
+            discount_percent: verdict.discount_percent,
+            resale_profit: verdict.resale_profit,
+            suspicious: verdict.suspicious,
+            per_unit,
+        });
+    }
+    let (suspicious, mut suitable): (Vec<Deal>, Vec<Deal>) = deals
         .into_iter()
-        .filter(|offer| wanted.accepts(offer))
-        .filter_map(|offer| {
-            let (offer_market, per_unit) = pricing.market_for(market, &offer);
-            let verdict = evaluate(watch.goal, watch.radius_km, offer_market, &offer)?;
-            Some(Deal {
-                watch_id: watch.id,
-                watch_name: watch.name.clone(),
-                found_at: now,
-                offer,
-                market_price: offer_market.median,
-                market_sample: market.sample,
-                discount_percent: verdict.discount_percent,
-                resale_profit: verdict.resale_profit,
-                suspicious: verdict.suspicious,
-                per_unit,
-            })
-        })
         .partition(|deal| deal.suspicious && !watch.include_suspicious);
     suitable.sort_by(|a, b| {
         b.resale_profit
@@ -87,6 +139,7 @@ pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assess
         market: Some(pricing.market_price(market)),
         suitable,
         hidden_suspicious: suspicious.len(),
+        sifted,
     }
 }
 
@@ -139,6 +192,7 @@ mod tests {
         let assessment = assess(&new_only, offers, Local::now());
 
         assert_eq!(assessment.comparable, 6, "б/у не участвуют в рынке новых");
+        assert_eq!(assessment.sifted.used, 2);
         assert_eq!(assessment.market, Some(MarketPrice::Whole(6_300)));
         assert_eq!(
             assessment.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
@@ -252,6 +306,10 @@ mod tests {
             assessment.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
             [3_000]
         );
+        assert_eq!(
+            (assessment.sifted.beyond_radius, assessment.sifted.not_cheap_enough),
+            (4, 2)
+        );
     }
 
     #[test]
@@ -278,6 +336,7 @@ mod tests {
         let assessment = assess(&nearby, offers, Local::now());
 
         assert_eq!(assessment.comparable, 5);
+        assert_eq!(assessment.sifted.copies, 3);
         assert_eq!(assessment.market, Some(MarketPrice::Whole(6_500)));
         assert_eq!(assessment.suitable.len(), 1);
     }
@@ -321,6 +380,7 @@ mod tests {
             assessment.comparable, 6,
             "гель в литрах и пачка без веса с килограммами не сравниваются"
         );
+        assert_eq!(assessment.sifted.no_unit_price, 2);
         assert_eq!(assessment.market.unwrap().to_string(), "320\u{a0}₽/кг");
         let [deal] = assessment.suitable.as_slice() else {
             panic!("выгодной должна быть одна пачка 9 кг, а не самая дешёвая на 450 г");
@@ -341,6 +401,49 @@ mod tests {
         };
         let assessment = assess(&sponges, offers, Local::now());
         assert_eq!(assessment.comparable, 0);
+        assert_eq!(assessment.sifted.no_unit_price, 6);
         assert!(assessment.market.is_none());
+    }
+
+    #[test]
+    fn sifting_says_why_the_rest_did_not_become_deals() {
+        let mut offers = market_offers();
+        offers.extend([
+            phone(55_000),
+            phone(62_000),
+            Offer {
+                url: "https://example.com/galaxy".into(),
+                ..Offer::sample("Samsung Galaxy S24 128GB", 60_000)
+            },
+        ]);
+        let picky = Watch {
+            price: PriceRange {
+                min: None,
+                max: Some(65_000),
+            },
+            goal: Goal::BelowMarket {
+                min_discount_percent: 20,
+            },
+            ..iphone_watch()
+        };
+
+        let assessment = assess(&picky, offers, Local::now());
+
+        assert_eq!(
+            assessment.sifted,
+            Sifted {
+                other_words: 1,
+                other_product: 2,
+                filters: 6,
+                not_cheap_enough: 1,
+                ..Sifted::default()
+            },
+            "Samsung — другие слова, чехол и Pro — другой товар, айфоны дороже 65 000 ₽ — фильтр цены, \
+             62 000 ₽ — всего 13 % ниже рынка"
+        );
+        assert_eq!(
+            assessment.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [55_000]
+        );
     }
 }

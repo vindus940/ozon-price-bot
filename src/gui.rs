@@ -1,6 +1,7 @@
 mod deals;
 mod journal;
 mod settings_tab;
+mod trial;
 mod watch_form;
 mod watches;
 
@@ -139,6 +140,7 @@ impl HunterApp {
         let home_is_set = self.hunter.home().is_some();
         let hunter = Arc::clone(&self.hunter);
         let Some(form) = self.form.as_mut() else { return };
+        let trial = hunter.trial();
 
         let mut open = true;
         let mut action = FormAction::Keep;
@@ -148,10 +150,18 @@ impl HunterApp {
             .default_width(600.0)
             .open(&mut open)
             .show(ctx, |ui| {
-                action = form.show(ui, home_is_set, |source| hunter.is_connected(source));
+                action = form.show(ui, home_is_set, |source| hunter.is_connected(source), trial.as_ref());
             });
 
         let close = match action {
+            FormAction::Try => {
+                form.problems = form
+                    .to_watch()
+                    .and_then(|watch| hunter.try_watch(watch))
+                    .err()
+                    .unwrap_or_default();
+                false
+            }
             FormAction::Save => match form.to_watch().and_then(|watch| hunter.save_watch(watch)) {
                 Ok(_) => true,
                 Err(problems) => {
@@ -163,6 +173,7 @@ impl HunterApp {
             FormAction::Keep => !open,
         };
         if close {
+            hunter.forget_trial();
             self.form = None;
         }
     }

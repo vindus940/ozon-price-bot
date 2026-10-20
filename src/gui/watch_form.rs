@@ -2,13 +2,14 @@ use std::str::FromStr;
 
 use eframe::egui::{self, RichText};
 
-use super::{BAD, WARN};
-use crate::hunt::{Category, Goal, Watch};
+use super::{BAD, WARN, trial};
+use crate::hunt::{Category, Goal, TrialStatus, Watch};
 use crate::marketplace::SourceKind;
 use crate::search::{PriceRange, ShopConditions};
 
 pub(super) enum FormAction {
     Keep,
+    Try,
     Save,
     Cancel,
 }
@@ -93,6 +94,7 @@ impl WatchForm {
         ui: &mut egui::Ui,
         home_is_set: bool,
         is_connected: impl Fn(SourceKind) -> bool,
+        trial: Option<&TrialStatus>,
     ) -> FormAction {
         egui::Grid::new("watch-form")
             .num_columns(2)
@@ -109,15 +111,27 @@ impl WatchForm {
         }
         ui.add_space(8.0);
 
+        let trying = matches!(trial, Some(TrialStatus::Queued | TrialStatus::Checking));
         let mut action = FormAction::Keep;
         ui.horizontal(|ui| {
             if ui.button(RichText::new("Сохранить").strong()).clicked() {
                 action = FormAction::Save;
             }
+            if ui
+                .add_enabled(!trying, egui::Button::new("Проверить, не сохраняя"))
+                .on_hover_text("Поискать сейчас и показать, что нашлось и почему отсеяно, — без записи и уведомлений")
+                .clicked()
+            {
+                action = FormAction::Try;
+            }
             if ui.button("Отмена").clicked() {
                 action = FormAction::Cancel;
             }
         });
+        if let Some(status) = trial {
+            ui.separator();
+            trial::show(ui, status);
+        }
         action
     }
 

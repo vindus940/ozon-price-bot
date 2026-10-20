@@ -59,7 +59,7 @@ pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, filter: &mut Option<u64>,
     });
 }
 
-fn card(ui: &mut egui::Ui, deal: &Deal) {
+pub(super) fn card(ui: &mut egui::Ui, deal: &Deal) {
     egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {

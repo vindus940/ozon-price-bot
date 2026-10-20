@@ -33,11 +33,14 @@ pub struct Verdict {
     pub suspicious: bool,
 }
 
-/// Выгодно ли предложение для этой цели. `None` — не выгодно или дальше радиуса
-/// (неизвестное расстояние радиус не проходит: «до 5 км» значит «точно не дальше 5 км»).
+/// Неизвестное расстояние радиус не проходит: «до 5 км» значит «точно не дальше 5 км».
+pub fn within_radius(radius_km: Option<u32>, offer: &Offer) -> bool {
+    radius_km.is_none_or(|radius| offer.distance_km.is_some_and(|km| km <= f64::from(radius)))
+}
+
+/// Выгодно ли предложение для этой цели. `None` — не выгодно или дальше радиуса.
 pub fn evaluate(goal: Goal, radius_km: Option<u32>, market: Market, offer: &Offer) -> Option<Verdict> {
-    let within_radius = radius_km.is_none_or(|radius| offer.distance_km.is_some_and(|km| km <= f64::from(radius)));
-    if !within_radius {
+    if !within_radius(radius_km, offer) {
         return None;
     }
 

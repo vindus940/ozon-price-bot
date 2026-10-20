@@ -9,6 +9,7 @@ mod journal;
 mod market;
 mod memory;
 mod schedule;
+mod trial;
 mod watch;
 
 use std::collections::HashMap;
@@ -20,7 +21,8 @@ use chrono::Local;
 use serde::Serialize;
 use tokio::sync::Notify;
 
-use assess::{Assessment, assess};
+use assess::assess;
+pub use assess::{Assessment, Sifted};
 use book::WatchBook;
 pub use category::Category;
 pub use deal::Deal;
@@ -34,10 +36,13 @@ pub use market::{MarketPrice, PerUnit};
 use memory::Notified;
 use schedule::Schedule;
 pub use schedule::{Outcome, RunStatus};
+pub use trial::TrialStatus;
+use trial::Trials;
 pub use watch::{Goal, Watch};
 
 use crate::geo::GeoPoint;
 use crate::marketplace::{OfferSource, SourceError, SourceKind};
+use crate::offer::Offer;
 use crate::storage::Storage;
 
 const SCHEDULE_TICK: Duration = Duration::from_secs(30);
@@ -73,6 +78,7 @@ struct State {
     feed: Feed,
     notified: Notified,
     journal: Journal,
+    trials: Trials,
     home: Option<GeoPoint>,
 }
 
@@ -121,6 +127,7 @@ impl Hunter {
             feed: storage.load(feed::FILE),
             notified: storage.load(memory::FILE),
             journal: Journal::default(),
+            trials: Trials::default(),
             home,
         };
         Self {
@@ -217,6 +224,28 @@ impl Hunter {
         self.wake.notify_one();
     }
 
+    /// Проверить слежку, не сохраняя: встаёт первой в общую очередь, ничего не записывает в находки
+    /// и в память об отправленном и ничего не отправляет. Итог — в `trial`.
+    pub fn try_watch(&self, watch: Watch) -> Result<(), Vec<String>> {
+        let mut state = self.state();
+        let problems = watch.problems(state.home.is_some());
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        state.trials.request(watch);
+        drop(state);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    pub fn trial(&self) -> Option<TrialStatus> {
+        self.state().trials.status()
+    }
+
+    pub fn forget_trial(&self) {
+        self.state().trials.forget();
+    }
+
     /// Слежки, которые ждали дома и упали без него, проверяются сразу, а не через свой интервал.
     pub fn set_home(&self, home: Option<GeoPoint>) {
         let mut state = self.state();
@@ -241,15 +270,26 @@ impl Hunter {
     }
 
     /// Проверяет слежки по расписанию и по кнопке «Проверить сейчас» — строго по одной,
-    /// чтобы не дёргать площадку параллельно.
+    /// чтобы не дёргать площадку параллельно. Пробная проверка из формы — первой: её ждут в окне.
     pub async fn run(self: Arc<Self>) {
         loop {
-            while let Some(watch_id) = self.next_to_check() {
-                self.check(watch_id).await;
-            }
+            self.check_pending().await;
             tokio::select! {
                 () = tokio::time::sleep(SCHEDULE_TICK) => {}
                 () = self.wake.notified() => {}
+            }
+        }
+    }
+
+    async fn check_pending(&self) {
+        loop {
+            let trial = self.state().trials.start();
+            if let Some((number, watch)) = trial {
+                self.try_out(number, &watch).await;
+            } else if let Some(watch_id) = self.next_to_check() {
+                self.check(watch_id).await;
+            } else {
+                return;
             }
         }
     }
@@ -267,34 +307,44 @@ impl Hunter {
     }
 
     async fn check_watch(&self, watch_id: u64) {
-        let Some((watch, home)) = ({
-            let state = self.state();
-            state.book.get(watch_id).cloned().map(|watch| (watch, state.home))
-        }) else {
+        let Some(watch) = self.state().book.get(watch_id).cloned() else {
             return;
         };
-
-        let Some(source) = self.sources.get(&watch.source) else {
-            let reason = format!("{} ещё не подключено — нужна разовая настройка", watch.source.title());
-            self.fail(&watch, reason).await;
-            return;
-        };
-
-        if watch.radius_km.is_some() && home.is_none() {
-            self.fail(&watch, "не указан дом — укажите его координаты в «Настройках»".into())
-                .await;
-            return;
-        }
-
-        match source.search(&watch.query, watch.search_area(home)).await {
+        match self.search(&watch).await {
             Ok(offers) => {
                 let assessment = assess(&watch, offers, Local::now());
                 if let Some((first_run, news)) = self.record(&watch, &assessment) {
                     self.alert(&watch, first_run, &news).await;
                 }
             }
-            Err(error) => self.fail(&watch, failure_reason(watch.source.title(), &error)).await,
+            Err(reason) => self.fail(&watch, reason).await,
         }
+    }
+
+    async fn try_out(&self, number: u64, watch: &Watch) {
+        let status = match self.search(watch).await {
+            Ok(offers) => TrialStatus::Done(assess(watch, offers, Local::now())),
+            Err(reason) => TrialStatus::Failed(reason),
+        };
+        self.state().trials.finish(number, status);
+    }
+
+    /// Всё найденное по слежке на её площадке или понятная причина, почему не получилось.
+    async fn search(&self, watch: &Watch) -> Result<Vec<Offer>, String> {
+        let Some(source) = self.sources.get(&watch.source) else {
+            return Err(format!(
+                "{} ещё не подключено — нужна разовая настройка",
+                watch.source.title()
+            ));
+        };
+        let home = self.state().home;
+        if watch.radius_km.is_some() && home.is_none() {
+            return Err("не указан дом — укажите его координаты в «Настройках»".into());
+        }
+        source
+            .search(&watch.query, watch.search_area(home))
+            .await
+            .map_err(|error| failure_reason(watch.source.title(), &error))
     }
 
     /// Сверяет находки с памятью и запоминает их. `None` — слежку успели изменить или удалить, пока шла проверка.
@@ -671,6 +721,61 @@ mod tests {
             hunter.run_status(id).map(|run| run.outcome),
             Some(Outcome::Failed(reason)) if reason.contains("Авито ещё не подключено")
         ));
+    }
+
+    #[tokio::test]
+    async fn trial_shows_what_would_be_found_without_saving_or_notifying() {
+        let mut offers = market_offers();
+        offers.push(phone(58_000));
+        let source = ChangingSource::with(offers);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("trial");
+        let hunter = hunter_with(&source, &notifier, &storage);
+
+        hunter.try_watch(iphone_watch()).unwrap();
+        assert!(matches!(hunter.trial(), Some(TrialStatus::Queued)));
+        hunter.check_pending().await;
+
+        let Some(TrialStatus::Done(assessment)) = hunter.trial() else {
+            panic!("пробная проверка должна закончиться итогом");
+        };
+        assert_eq!(assessment.market, Some(MarketPrice::Whole(72_000)));
+        assert_eq!(
+            assessment.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [58_000]
+        );
+        assert!(alerts(&notifier).is_empty(), "пробная проверка ничего не отправляет");
+        assert!(hunter.deals().is_empty() && hunter.watches().is_empty());
+        assert!(
+            !storage.dir().join(feed::FILE).exists() && !storage.dir().join(memory::FILE).exists(),
+            "и ничего не записывает"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_trial_says_why() {
+        let source = ChangingSource::with(market_offers());
+        source.captcha.store(true, Ordering::SeqCst);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("trial-failed");
+        let hunter = hunter_with(&source, &notifier, &storage);
+
+        hunter.try_watch(iphone_watch()).unwrap();
+        hunter.check_pending().await;
+
+        assert!(matches!(
+            hunter.trial(),
+            Some(TrialStatus::Failed(reason)) if reason.contains("пройдите проверку в окне браузера программы")
+        ));
+        assert!(alerts(&notifier).is_empty());
+    }
+
+    #[test]
+    fn invalid_watch_is_not_tried() {
+        let storage = storage("trial-invalid");
+        let hunter = Hunter::new(HashMap::new(), None, storage.clone(), None);
+        assert_eq!(hunter.try_watch(Watch::new_draft()).unwrap_err().len(), 2);
+        assert!(hunter.trial().is_none());
     }
 
     #[test]
