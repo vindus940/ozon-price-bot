@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::geo::GeoPoint;
 use crate::hunt::category::Category;
 use crate::marketplace::{Area, SourceKind};
-use crate::search::{OzonConditions, PriceRange, SearchRequest};
+use crate::search::{PriceRange, SearchRequest, ShopConditions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Goal {
@@ -33,9 +33,10 @@ pub struct Watch {
     /// По умолчанию такие не присылаются, но и не теряются: их число видно в статусе слежки.
     #[serde(default)]
     pub include_suspicious: bool,
-    /// «Доставка до завтра», «только Ozon» — только для Ozon: у Авито этих данных нет.
-    #[serde(default)]
-    pub ozon: OzonConditions,
+    /// «Доставка до завтра» (Ozon, ДНС) и «только Ozon». У Авито этих данных нет.
+    /// В файлах слежек раньше называлось `ozon` — старые файлы читаются как есть.
+    #[serde(default, alias = "ozon")]
+    pub shop: ShopConditions,
     /// Только новые: объявления с признаками б/у не участвуют ни в рынке, ни в находках —
     /// новая и ношеная вещь разный товар. Для Авито: на Ozon всё новое.
     #[serde(default)]
@@ -61,7 +62,7 @@ impl Watch {
                 min_discount_percent: 20,
             },
             include_suspicious: false,
-            ozon: OzonConditions::default(),
+            shop: ShopConditions::default(),
             new_only: false,
             every_minutes: 15,
             enabled: true,
@@ -142,7 +143,7 @@ impl Watch {
             price: self.price,
             min_rating: self.min_rating,
             min_reviews: self.min_reviews,
-            ozon: self.ozon,
+            shop: self.shop,
             ..self.comparables_request()
         }
     }

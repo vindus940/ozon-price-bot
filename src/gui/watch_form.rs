@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText};
 use super::{BAD, WARN};
 use crate::hunt::{Category, Goal, Watch};
 use crate::marketplace::SourceKind;
-use crate::search::{OzonConditions, PriceRange};
+use crate::search::{PriceRange, ShopConditions};
 
 pub(super) enum FormAction {
     Keep,
@@ -38,7 +38,7 @@ pub(super) struct WatchForm {
     min_profit: u64,
     costs: u64,
     include_suspicious: bool,
-    ozon: OzonConditions,
+    shop: ShopConditions,
     new_only: bool,
     every_minutes: u32,
     pub(super) problems: Vec<String>,
@@ -73,7 +73,7 @@ impl WatchForm {
             min_profit,
             costs,
             include_suspicious: watch.include_suspicious,
-            ozon: watch.ozon,
+            shop: watch.shop,
             new_only: watch.new_only,
             every_minutes: watch.every_minutes,
             problems: Vec::new(),
@@ -222,12 +222,14 @@ impl WatchForm {
         });
         ui.end_row();
 
-        if self.source.has_delivery_and_seller() {
+        if self.source.has_delivery() {
             ui.label("Доставка и продавец");
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.ozon.by_tomorrow, "Привезут не позже завтра");
-                ui.checkbox(&mut self.ozon.only_ozon, "Только Ozon");
-                ui.weak("рынок всё равно считается по всем продавцам");
+                ui.checkbox(&mut self.shop.by_tomorrow, "Привезут не позже завтра");
+                if self.source.has_marketplace_seller() {
+                    ui.checkbox(&mut self.shop.only_ozon, "Только Ozon");
+                }
+                ui.weak("рынок всё равно считается по всем предложениям");
             });
             ui.end_row();
         }
@@ -361,10 +363,9 @@ impl WatchForm {
                 },
             },
             include_suspicious: self.include_suspicious,
-            ozon: if self.source.has_delivery_and_seller() {
-                self.ozon
-            } else {
-                OzonConditions::default()
+            shop: ShopConditions {
+                by_tomorrow: self.shop.by_tomorrow && self.source.has_delivery(),
+                only_ozon: self.shop.only_ozon && self.source.has_marketplace_seller(),
             },
             new_only: self.new_only && self.source.has_used_goods(),
             every_minutes: self.every_minutes,
@@ -430,7 +431,7 @@ mod tests {
                 costs: 300,
             },
             include_suspicious: true,
-            ozon: OzonConditions::default(),
+            shop: ShopConditions::default(),
             new_only: true,
             every_minutes: 20,
             enabled: false,
@@ -439,21 +440,45 @@ mod tests {
     }
 
     #[test]
-    fn ozon_conditions_are_dropped_when_switched_to_avito() {
+    fn shop_conditions_keep_only_what_the_source_knows() {
         let fast_ozon = Watch {
             name: "Наушники".into(),
             query: "наушники sony".into(),
-            ozon: OzonConditions {
+            shop: ShopConditions {
                 by_tomorrow: true,
                 only_ozon: true,
             },
             ..Watch::new_draft()
         };
         let mut form = WatchForm::edit(&fast_ozon);
-        assert_eq!(form.to_watch().unwrap().ozon, fast_ozon.ozon);
+        assert_eq!(form.to_watch().unwrap().shop, fast_ozon.shop);
+
+        form.source = SourceKind::Dns;
+        assert_eq!(
+            form.to_watch().unwrap().shop,
+            ShopConditions {
+                by_tomorrow: true,
+                only_ozon: false,
+            },
+            "у ДНС есть срок доставки, но нет сторонних продавцов"
+        );
 
         form.source = SourceKind::Avito;
+        assert_eq!(form.to_watch().unwrap().shop, ShopConditions::default());
+    }
 
-        assert_eq!(form.to_watch().unwrap().ozon, OzonConditions::default());
+    #[test]
+    fn watches_saved_before_the_rename_keep_their_conditions() {
+        let mut saved = serde_json::to_value(Watch::new_draft()).unwrap();
+        let fields = saved.as_object_mut().unwrap();
+        fields.remove("shop");
+        fields.insert(
+            "ozon".into(),
+            serde_json::json!({ "by_tomorrow": true, "only_ozon": false }),
+        );
+
+        let watch: Watch = serde_json::from_value(saved).unwrap();
+
+        assert!(watch.shop.by_tomorrow);
     }
 }

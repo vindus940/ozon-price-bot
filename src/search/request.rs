@@ -32,19 +32,19 @@ pub struct SearchRequest {
     /// это объём, но цена за литр чайника ничего не значит.
     pub per_unit: Option<Unit>,
     pub order: Order,
-    pub ozon: OzonConditions,
+    pub shop: ShopConditions,
 }
 
-/// Условия, которые понимает только Ozon: у объявлений Авито нет ни срока доставки, ни продавца-маркетплейса.
+/// Условия к магазину: срок доставки знают Ozon и ДНС, продавца-маркетплейс — только Ozon. У объявлений Авито нет ни того, ни другого.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct OzonConditions {
+pub struct ShopConditions {
     /// «доставка завтра»: привезут не позже завтра.
     pub by_tomorrow: bool,
     /// «только Ozon»: продаёт сам маркетплейс, а не сторонний продавец.
     pub only_ozon: bool,
 }
 
-impl OzonConditions {
+impl ShopConditions {
     pub fn accepts(self, offer: &Offer) -> bool {
         (!self.by_tomorrow || offer.arrives_by_tomorrow()) && (!self.only_ozon || offer.sold_by_ozon)
     }
@@ -108,7 +108,7 @@ impl SearchRequest {
             min_reviews,
             per_unit,
             order: order.unwrap_or_default(),
-            ozon: OzonConditions {
+            shop: ShopConditions {
                 by_tomorrow: by_tomorrow.is_some(),
                 only_ozon: only_ozon.is_some(),
             },
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(
             SearchRequest::parse("наушники sony доставка завтра только Ozon до 5000"),
             SearchRequest {
-                ozon: OzonConditions {
+                shop: ShopConditions {
                     by_tomorrow: true,
                     only_ozon: true,
                 },
@@ -285,8 +285,8 @@ mod tests {
         }
         let plain = SearchRequest::parse("доставка воды");
         assert_eq!(
-            (plain.query.as_str(), plain.ozon),
-            ("доставка воды", OzonConditions::default())
+            (plain.query.as_str(), plain.shop),
+            ("доставка воды", ShopConditions::default())
         );
     }
 

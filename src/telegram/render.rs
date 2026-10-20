@@ -221,7 +221,7 @@ fn conditions(request: &SearchRequest) -> String {
     ]
     .into_iter()
     .flatten()
-    .chain(request.ozon.labels().into_iter().map(String::from))
+    .chain(request.shop.labels().into_iter().map(String::from))
     .collect();
 
     if conditions.is_empty() {

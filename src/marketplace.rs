@@ -51,8 +51,13 @@ impl SourceKind {
         !self.radii_km().is_empty()
     }
 
-    /// Срок доставки и метку «Ozon» знает только маркетплейс: у объявлений Авито их нет.
-    pub fn has_delivery_and_seller(self) -> bool {
+    /// Срок доставки пишут магазины — Ozon и ДНС; у объявлений Авито его нет.
+    pub fn has_delivery(self) -> bool {
+        matches!(self, SourceKind::Ozon | SourceKind::Dns)
+    }
+
+    /// Метка «продаёт сам Ozon» бывает только у маркетплейса со сторонними продавцами.
+    pub fn has_marketplace_seller(self) -> bool {
         self == SourceKind::Ozon
     }
 

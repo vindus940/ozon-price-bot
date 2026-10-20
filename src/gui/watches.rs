@@ -123,7 +123,7 @@ fn conditions(watch: &Watch) -> String {
     if let Some(reviews) = watch.min_reviews {
         parts.push(format!("отзывов от {reviews}"));
     }
-    parts.extend(watch.ozon.labels().into_iter().map(String::from));
+    parts.extend(watch.shop.labels().into_iter().map(String::from));
     if watch.new_only {
         parts.push("только новые".into());
     }

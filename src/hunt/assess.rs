@@ -111,7 +111,7 @@ mod tests {
     use crate::hunt::fixtures::{iphone_watch, market_offers, phone};
     use crate::hunt::watch::Goal;
     use crate::marketplace::SourceKind;
-    use crate::search::{OzonConditions, PriceRange};
+    use crate::search::{PriceRange, ShopConditions};
 
     #[test]
     fn new_only_compares_new_with_new() {
@@ -177,9 +177,9 @@ mod tests {
             ..phone(58_000)
         });
         let ozon_only = Watch {
-            ozon: OzonConditions {
+            shop: ShopConditions {
                 only_ozon: true,
-                ..OzonConditions::default()
+                ..ShopConditions::default()
             },
             ..iphone_watch()
         };

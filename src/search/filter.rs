@@ -1,6 +1,6 @@
 use crate::offer::Offer;
 use crate::search::synonyms::spellings;
-use crate::search::{OzonConditions, PriceRange, SearchRequest};
+use crate::search::{PriceRange, SearchRequest, ShopConditions};
 use crate::text::{normalize, words};
 
 pub struct OfferFilter {
@@ -9,7 +9,7 @@ pub struct OfferFilter {
     price: PriceRange,
     min_rating: Option<f32>,
     min_reviews: Option<u64>,
-    ozon: OzonConditions,
+    shop: ShopConditions,
 }
 
 impl OfferFilter {
@@ -20,7 +20,7 @@ impl OfferFilter {
             price: request.price,
             min_rating: request.min_rating,
             min_reviews: request.min_reviews,
-            ozon: request.ozon,
+            shop: request.shop,
         }
     }
 
@@ -28,7 +28,7 @@ impl OfferFilter {
         self.price.contains(offer.price)
             && self.matches_words(&offer.name)
             && self.meets_quality(offer)
-            && self.ozon.accepts(offer)
+            && self.shop.accepts(offer)
     }
 
     fn matches_words(&self, name: &str) -> bool {
