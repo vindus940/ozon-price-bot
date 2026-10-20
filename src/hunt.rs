@@ -25,7 +25,7 @@ use assess::assess;
 pub use assess::{Assessment, Sifted};
 use book::WatchBook;
 pub use category::Category;
-pub use deal::Deal;
+pub use deal::{Deal, Miss};
 use feed::Feed;
 use journal::Journal;
 pub use journal::JournalEntry;
@@ -205,7 +205,7 @@ impl Hunter {
         let Some(watch) = state.book.remove(watch_id) else {
             return;
         };
-        state.notified.forget(watch_id);
+        state.notified.forget_watch(watch_id);
         state.schedule.forget(watch_id);
         state.journal.write(format!("Слежка «{}» удалена", watch.name));
         state.save_watches(&self.storage);
@@ -253,6 +253,54 @@ impl Hunter {
         state.schedule.retry_failed();
         drop(state);
         self.wake.notify_one();
+    }
+
+    /// «Мимо»: находка уходит из ленты, и эта слежка больше её не пришлёт, даже подешевевшую.
+    /// Возвращает слова из её названия, которые стоит предложить в стоп-слова, — пусто для «уже продано».
+    pub fn dismiss(&self, watch_id: u64, url: &str, miss: Miss) -> Vec<String> {
+        let mut state = self.state();
+        let Some(deal) = state.feed.remove(watch_id, url) else {
+            return Vec::new();
+        };
+        state.notified.dismiss(watch_id, url);
+        state.journal.write(format!(
+            "«{}»: «{}» — мимо, {}",
+            deal.watch_name,
+            deal.offer.name,
+            miss.title()
+        ));
+        state.save_deals(&self.storage);
+        state.save_notified(&self.storage);
+        if !miss.suggests_stop_words() {
+            return Vec::new();
+        }
+        let kept = state.feed.deals();
+        let kept: Vec<&str> = kept
+            .iter()
+            .filter(|other| other.watch_id == watch_id)
+            .map(|other| other.offer.name.as_str())
+            .collect();
+        state
+            .book
+            .get(watch_id)
+            .map(|watch| watch.stop_word_candidates(&deal.offer.name, &kept))
+            .unwrap_or_default()
+    }
+
+    /// Стоп-слово только сужает слежку, поэтому память об отправленном остаётся: в отличие от правки
+    /// в форме, слежка не начинается заново и не присылает то же самое второй раз.
+    pub fn add_stop_word(&self, watch_id: u64, word: &str) {
+        let mut state = self.state();
+        if !state.book.add_stop_word(watch_id, word) {
+            return;
+        }
+        let name = state
+            .book
+            .get(watch_id)
+            .map(|watch| watch.name.clone())
+            .unwrap_or_default();
+        state.journal.write(format!("Слежка «{name}»: стоп-слово «{word}»"));
+        state.save_watches(&self.storage);
     }
 
     pub fn clear_deals(&self) {
@@ -787,6 +835,55 @@ mod tests {
             [58_000],
             "чехол и Pro отсеяны словами слежки, как и без ссылки"
         );
+    }
+
+    #[tokio::test]
+    async fn dismissed_deal_never_returns_and_stop_word_keeps_the_watch_going() {
+        let import = |price| Offer {
+            url: "https://example.com/import".into(),
+            ..Offer::sample("Apple iPhone 15 128GB серый импорт", price)
+        };
+        let mut offers = market_offers();
+        offers.extend([phone(58_000), import(57_000)]);
+        let source = ChangingSource::with(offers);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("dismiss");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.check(id).await;
+
+        let words = hunter.dismiss(id, "https://example.com/import", Miss::Fake);
+
+        assert_eq!(words, ["серый", "импорт"], "«apple» и «128gb» есть и в хорошей находке");
+        assert_eq!(
+            hunter.deals().iter().map(|d| d.offer.price).collect::<Vec<_>>(),
+            [58_000]
+        );
+        assert!(
+            hunter
+                .journal()
+                .iter()
+                .any(|entry| entry.text.contains("мимо, подделка"))
+        );
+
+        source
+            .offers
+            .lock()
+            .unwrap()
+            .retain(|o| o.url != "https://example.com/import");
+        source.offers.lock().unwrap().push(import(50_000));
+        hunter.check(id).await;
+        assert_eq!(hunter.deals().len(), 1, "отмеченная «мимо» не вернулась и подешевев");
+
+        hunter.add_stop_word(id, "импорт");
+        hunter.check(id).await;
+        assert_eq!(hunter.watches()[0].stop_words, ["импорт"]);
+        assert_eq!(
+            alerts(&notifier),
+            ["started:2"],
+            "стоп-слово не начинает слежку заново: второго «запущена» нет"
+        );
+        assert!(hunter.dismiss(id, "https://example.com/import", Miss::Sold).is_empty());
     }
 
     #[tokio::test]

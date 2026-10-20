@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,10 @@ const NOTEWORTHY_DROP_PERCENT: u64 = 3;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Notified {
     by_watch: HashMap<u64, HashMap<String, u64>>,
+    /// Находки, которые вы отметили «мимо»: их слежка не присылает больше никогда, даже подешевевшими.
+    /// Правка слежки их не сбрасывает — подделка остаётся подделкой и при других условиях.
+    #[serde(default)]
+    dismissed: HashMap<u64, HashSet<String>>,
 }
 
 impl Notified {
@@ -38,6 +42,9 @@ impl Notified {
     }
 
     fn is_news(&self, watch_id: u64, url: &str, price: u64) -> bool {
+        if self.dismissed.get(&watch_id).is_some_and(|urls| urls.contains(url)) {
+            return false;
+        }
         match self.by_watch.get(&watch_id).and_then(|seen| seen.get(url)) {
             None => true,
             Some(&notified_price) => price * 100 <= notified_price * (100 - NOTEWORTHY_DROP_PERCENT),
@@ -57,6 +64,16 @@ impl Notified {
 
     pub fn forget(&mut self, watch_id: u64) {
         self.by_watch.remove(&watch_id);
+    }
+
+    /// Слежку удалили: забыть о ней всё, и отметки «мимо» тоже.
+    pub fn forget_watch(&mut self, watch_id: u64) {
+        self.forget(watch_id);
+        self.dismissed.remove(&watch_id);
+    }
+
+    pub fn dismiss(&mut self, watch_id: u64, url: &str) {
+        self.dismissed.entry(watch_id).or_default().insert(url.to_string());
     }
 
     /// Уведомление не ушло — предложение снова считается новым и будет отправлено при следующей проверке.
@@ -104,5 +121,26 @@ mod tests {
         notified.forget_offer(3, "a");
         assert!(notified.is_news(3, "a", 100));
         assert!(!notified.is_first_run(3));
+    }
+
+    #[test]
+    fn dismissed_offer_never_comes_back_until_the_watch_is_deleted() {
+        let mut notified = Notified::default();
+        notified.remember(4, "fake", 1_000);
+        notified.dismiss(4, "fake");
+        assert!(!notified.is_news(4, "fake", 500), "даже подешевев вдвое");
+        assert!(notified.is_news(5, "fake", 1_000), "у другой слежки своё мнение");
+
+        notified.forget(4);
+        assert!(!notified.is_news(4, "fake", 1_000), "правка слежки отметку не снимает");
+
+        notified.forget_watch(4);
+        assert!(notified.is_news(4, "fake", 1_000));
+    }
+
+    #[test]
+    fn memory_saved_before_dismissals_is_read() {
+        let old: Notified = serde_json::from_str(r#"{"by_watch":{"1":{"https://example.com/a":100}}}"#).unwrap();
+        assert!(!old.is_news(1, "https://example.com/a", 100));
     }
 }

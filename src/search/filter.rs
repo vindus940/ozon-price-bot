@@ -47,6 +47,13 @@ impl OfferFilter {
     }
 }
 
+/// Встречается ли слово в тексте так, как его ищет фильтр — без окончания и во всех написаниях бренда.
+/// По этому правилу стоп-слово убирает предложение, поэтому и подбирать стоп-слова нужно по нему же.
+pub fn mentions(text: &str, word: &str) -> bool {
+    let text = normalize(text);
+    Keyword::all_in(word).iter().all(|keyword| keyword.occurs_in(&text))
+}
+
 /// Слово запроса без окончания и во всех написаниях бренда: «наушники» находит и «наушников»,
 /// «makita» — и «Макиту».
 struct Keyword(Vec<String>);
@@ -167,5 +174,12 @@ mod tests {
         assert!(!filter.accepts(&Offer::sample("Наушники Samsung Galaxy Buds", 5000)));
         assert!(!filter.accepts(&Offer::sample("Наушники Самсунг", 5000)));
         assert!(filter.accepts(&Offer::sample("Наушники Sony WH-CH520", 5000)));
+    }
+
+    #[test]
+    fn mentions_follows_the_same_rule_as_stop_words() {
+        assert!(mentions("Наушники Logitech G435", "наушников"), "без окончания");
+        assert!(mentions("Шуруповерт Макита", "makita"), "в другом написании бренда");
+        assert!(!mentions("Наушники Logitech G435", "чехол"));
     }
 }

@@ -2,9 +2,23 @@ use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD};
 use crate::format::{rub, signed_rub, tile_marks};
-use crate::hunt::{Deal, Hunter};
+use crate::hunt::{Deal, Hunter, Miss};
 
-pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, filter: &mut Option<u64>, confirm_clear: &mut bool) {
+/// Что показать после «мимо»: находка скрыта, а эти слова можно добавить слежке в стоп-слова.
+pub(super) struct DismissNotice {
+    watch_id: u64,
+    watch_name: String,
+    words: Vec<String>,
+    added: Vec<String>,
+}
+
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    hunter: &Hunter,
+    filter: &mut Option<u64>,
+    confirm_clear: &mut bool,
+    notice: &mut Option<DismissNotice>,
+) {
     let watches = hunter.watches();
     let deals = hunter.deals();
     if filter.is_some_and(|id| !watches.iter().any(|watch| watch.id == id)) {
@@ -38,8 +52,12 @@ pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, filter: &mut Option<u64>,
             *confirm_clear = true;
         }
     });
-    ui.weak("Всё, что нашли слежки (о том же приходят уведомления в Telegram). Свежие — сверху, ссылка открывает предложение в браузере.");
+    ui.weak(
+        "Всё, что нашли слежки (о том же приходят уведомления в Telegram). Свежие — сверху, ссылка открывает \
+         предложение в браузере. «Мимо» убирает находку насовсем: слежка её больше не пришлёт.",
+    );
     ui.add_space(8.0);
+    notice_panel(ui, hunter, notice);
 
     let visible: Vec<&Deal> = deals
         .iter()
@@ -53,13 +71,23 @@ pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, filter: &mut Option<u64>,
 
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
         for deal in visible {
-            card(ui, deal);
+            let mut miss = None;
+            card(ui, deal, |ui| miss = miss_menu(ui));
+            if let Some(miss) = miss {
+                *notice = Some(DismissNotice {
+                    watch_id: deal.watch_id,
+                    watch_name: deal.watch_name.clone(),
+                    words: hunter.dismiss(deal.watch_id, &deal.offer.url, miss),
+                    added: Vec::new(),
+                });
+            }
             ui.add_space(6.0);
         }
     });
 }
 
-pub(super) fn card(ui: &mut egui::Ui, deal: &Deal) {
+/// `actions` дорисовываются внизу карточки: во вкладке «Находки» это «Мимо», в пробной проверке — ничего.
+pub(super) fn card(ui: &mut egui::Ui, deal: &Deal, actions: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -106,5 +134,76 @@ pub(super) fn card(ui: &mut egui::Ui, deal: &Deal) {
             details.push(marks);
         }
         ui.weak(details.join(" · "));
+        actions(ui);
     });
+}
+
+fn miss_menu(ui: &mut egui::Ui) -> Option<Miss> {
+    let mut chosen = None;
+    ui.menu_button("Мимо", |ui| {
+        for miss in Miss::ALL {
+            if ui.button(capitalized(miss.title())).clicked() {
+                chosen = Some(miss);
+                ui.close();
+            }
+        }
+    });
+    chosen
+}
+
+fn notice_panel(ui: &mut egui::Ui, hunter: &Hunter, notice: &mut Option<DismissNotice>) {
+    let Some(current) = notice.as_mut() else {
+        return;
+    };
+    let mut done = false;
+    egui::Frame::group(ui.style()).inner_margin(8.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(format!(
+            "Находка скрыта — слежка «{}» её больше не пришлёт.",
+            current.watch_name
+        ));
+        let left: Vec<String> = current
+            .words
+            .iter()
+            .filter(|word| !current.added.contains(word))
+            .cloned()
+            .collect();
+        if !left.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Чтобы похожее не приходило, добавьте слежке стоп-слово:");
+                for word in left {
+                    if ui.button(&word).clicked() {
+                        hunter.add_stop_word(current.watch_id, &word);
+                        current.added.push(word);
+                    }
+                }
+            });
+        }
+        if !current.added.is_empty() {
+            ui.weak(format!("Добавлено в стоп-слова: {}", current.added.join(", ")));
+        }
+        done = ui.button("Готово").clicked();
+    });
+    if done {
+        *notice = None;
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_items_start_with_a_capital_letter() {
+        assert_eq!(capitalized("б/у или брак"), "Б/у или брак");
+        assert_eq!(capitalized(""), "");
+    }
 }

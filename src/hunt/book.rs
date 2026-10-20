@@ -52,6 +52,18 @@ impl WatchBook {
         true
     }
 
+    /// `false` — слежки уже нет или такое стоп-слово у неё уже есть.
+    pub fn add_stop_word(&mut self, watch_id: u64, word: &str) -> bool {
+        let Some(watch) = self.watches.iter_mut().find(|watch| watch.id == watch_id) else {
+            return false;
+        };
+        if watch.stop_words.iter().any(|stop| stop == word) {
+            return false;
+        }
+        watch.stop_words.push(word.to_string());
+        true
+    }
+
     /// Слежка та же, что в начале проверки: её не изменили и не удалили, пока шёл поиск.
     /// Включение и выключение не в счёт — найденное от этого не устаревает.
     pub fn still_has(&self, checked: &Watch) -> bool {

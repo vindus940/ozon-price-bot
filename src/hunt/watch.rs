@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 use crate::geo::GeoPoint;
 use crate::hunt::category::Category;
 use crate::marketplace::{Area, SourceKind};
-use crate::search::{PriceRange, SearchRequest, ShopConditions};
+use crate::search::{PriceRange, SearchRequest, ShopConditions, mentions};
+use crate::text::words;
+
+/// Больше — уже не подсказка, а всё название по словам.
+const STOP_WORD_CANDIDATES: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Goal {
@@ -124,6 +128,23 @@ impl Watch {
         problems
     }
 
+    /// Слова из названия находки, которые можно добавить в стоп-слова: каждое уберёт её, но не сам запрос
+    /// и не находки `kept`, которые остаются в ленте. Короткие слова («для», «и») и обозначения с цифрами
+    /// («128gb», «2024») не предлагаются: первые встречаются в чём угодно, вторые — характеристики, а не другой товар.
+    pub fn stop_word_candidates(&self, title: &str, kept: &[&str]) -> Vec<String> {
+        let mut candidates: Vec<String> = Vec::new();
+        for word in words(title) {
+            let telling = word.chars().count() >= 4 && word.chars().all(char::is_alphabetic);
+            let harmless = !mentions(&self.query, &word) && !kept.iter().any(|other| mentions(other, &word));
+            let new = !self.stop_words.iter().any(|stop| mentions(&word, stop)) && !candidates.contains(&word);
+            if telling && harmless && new {
+                candidates.push(word);
+            }
+        }
+        candidates.truncate(STOP_WORD_CANDIDATES);
+        candidates
+    }
+
     /// Где искать на площадке. Рынок нужен шире вашего радиуса, иначе похожих не наберётся,
     /// поэтому берётся самый большой радиус площадки, а ваш применяется к выгодным предложениям.
     pub fn search_area(&self, home: Option<GeoPoint>) -> Option<Area> {
@@ -224,6 +245,29 @@ mod tests {
         assert_eq!(
             by_link("https://www.avito.ru/moskva?q=iphone").problems(false),
             ["Ссылка должна вести на www.ozon.ru, а эта ведёт на www.avito.ru"]
+        );
+    }
+
+    #[test]
+    fn stop_word_candidates_drop_the_offer_but_not_the_query() {
+        let headphones = Watch {
+            query: "наушники sony wh-ch520".into(),
+            stop_words: vec!["копия".into()],
+            ..watch()
+        };
+
+        assert_eq!(
+            headphones.stop_word_candidates("Чехол для наушников Сони WH-CH520, силиконовый, 2024", &[]),
+            ["чехол", "силиконовый"],
+            "«наушников» и «Сони» — это сам запрос, «для» и «2024» ничего не говорят"
+        );
+        assert_eq!(
+            headphones.stop_word_candidates(
+                "Беспроводные наушники Sony WH-CH520 копия, бежевые",
+                &["Беспроводные наушники Sony WH-CH520, синие"]
+            ),
+            ["бежевые"],
+            "«копия» — уже стоп-слово, «беспроводные» убрали бы и хорошую находку"
         );
     }
 

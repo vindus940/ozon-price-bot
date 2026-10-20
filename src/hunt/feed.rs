@@ -36,6 +36,14 @@ impl Feed {
     pub fn clear(&mut self) {
         self.deals.clear();
     }
+
+    pub fn remove(&mut self, watch_id: u64, url: &str) -> Option<Deal> {
+        let index = self
+            .deals
+            .iter()
+            .position(|deal| deal.watch_id == watch_id && deal.offer.url == url)?;
+        self.deals.remove(index)
+    }
 }
 
 #[cfg(test)]
@@ -65,6 +73,16 @@ mod tests {
 
     fn prices(feed: &Feed) -> Vec<u64> {
         feed.deals().iter().map(|deal| deal.offer.price).collect()
+    }
+
+    #[test]
+    fn removed_is_only_that_offer_of_that_watch() {
+        let mut feed = Feed::default();
+        feed.add(&[deal(1, "a", 50_000), deal(2, "a", 51_000), deal(1, "b", 52_000)]);
+
+        assert_eq!(feed.remove(1, "a").map(|deal| deal.offer.price), Some(50_000));
+        assert_eq!(prices(&feed), [51_000, 52_000]);
+        assert!(feed.remove(1, "a").is_none());
     }
 
     #[test]

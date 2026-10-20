@@ -45,7 +45,7 @@ fn done(ui: &mut egui::Ui, assessment: &Assessment) {
         ui.label("Примеры выгодных:");
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for deal in assessment.suitable.iter().take(EXAMPLES) {
-                card(ui, deal);
+                card(ui, deal, |_| {});
                 ui.add_space(4.0);
             }
         });

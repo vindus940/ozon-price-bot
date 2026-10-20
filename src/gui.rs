@@ -39,6 +39,7 @@ struct HunterApp {
     pending_delete: Option<u64>,
     deals_filter: Option<u64>,
     confirm_clear_deals: bool,
+    dismissed: Option<deals::DismissNotice>,
     settings: SettingsTab,
 }
 
@@ -62,6 +63,7 @@ pub fn run(
         pending_delete: None,
         deals_filter: None,
         confirm_clear_deals: false,
+        dismissed: None,
         settings: SettingsTab::new(hunter, storage, settings, runtime),
     };
     eframe::run_native(
@@ -126,7 +128,13 @@ impl eframe::App for HunterApp {
             .show(ui, |ui| self.navigation(ui));
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
             Tab::Watches => watches::show(ui, &self.hunter, &mut self.form, &mut self.pending_delete),
-            Tab::Deals => deals::show(ui, &self.hunter, &mut self.deals_filter, &mut self.confirm_clear_deals),
+            Tab::Deals => deals::show(
+                ui,
+                &self.hunter,
+                &mut self.deals_filter,
+                &mut self.confirm_clear_deals,
+                &mut self.dismissed,
+            ),
             Tab::Settings => self.settings.show(ui),
             Tab::Journal => journal::show(ui, &self.hunter),
         });

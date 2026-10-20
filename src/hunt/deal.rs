@@ -26,6 +26,33 @@ pub struct Deal {
     pub per_unit: Option<PerUnit>,
 }
 
+/// Почему находка — мимо. Такая находка уходит из ленты и больше не присылается этой слежкой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Miss {
+    NotThat,
+    UsedOrBroken,
+    Fake,
+    Sold,
+}
+
+impl Miss {
+    pub const ALL: [Miss; 4] = [Miss::NotThat, Miss::UsedOrBroken, Miss::Fake, Miss::Sold];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Miss::NotThat => "не тот товар",
+            Miss::UsedOrBroken => "б/у или брак",
+            Miss::Fake => "подделка",
+            Miss::Sold => "уже продано",
+        }
+    }
+
+    /// Проданное ничего не говорит о слежке, остальное — повод сузить её стоп-словом.
+    pub fn suggests_stop_words(self) -> bool {
+        self != Miss::Sold
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Verdict {
     pub discount_percent: u64,
