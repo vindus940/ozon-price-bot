@@ -75,6 +75,45 @@ pub fn run(
     .map_err(|error| anyhow!("не удалось открыть окно: {error}"))
 }
 
+/// Маленькое окно вместо второго экземпляра программы.
+pub fn already_running() -> Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(TITLE)
+            .with_inner_size([460.0, 150.0])
+            .with_resizable(false),
+        ..Default::default()
+    };
+    eframe::run_native(
+        TITLE,
+        options,
+        Box::new(|creation| {
+            use_windows_font(&creation.egui_ctx);
+            Ok(Box::new(AlreadyRunning))
+        }),
+    )
+    .map_err(|error| anyhow!("не удалось открыть окно: {error}"))
+}
+
+struct AlreadyRunning;
+
+impl eframe::App for AlreadyRunning {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Программа уже запущена").strong().size(17.0));
+            ui.label(
+                "Её окно уже открыто — посмотрите на панели задач. Второй раз программа не запускается: \
+                 оба окна управляли бы одним браузером и одними слежками.",
+            );
+            ui.add_space(8.0);
+            if ui.button("Понятно").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+    }
+}
+
 impl eframe::App for HunterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Проверки идут в фоне: раз в секунду окно перерисовывается, чтобы показать свежие статусы.

@@ -6,6 +6,7 @@ mod geo;
 mod gui;
 mod health;
 mod hunt;
+mod instance;
 mod marketplace;
 mod offer;
 mod quantity;
@@ -41,7 +42,15 @@ fn main() -> Result<()> {
     dotenvy::from_path(app_dir.join(".env")).ok();
     init_logging();
 
-    let storage = Storage::new(app_dir.join("data"));
+    let data_dir = app_dir.join("data");
+    let Some(_instance) = instance::claim(&data_dir)? else {
+        log::warn!(
+            "программа из {} уже запущена — второй экземпляр не запускается",
+            app_dir.display()
+        );
+        return gui::already_running();
+    };
+    let storage = Storage::new(data_dir);
     let settings: UserSettings = storage.load(settings::FILE);
     let config = Config::load(&settings, &app_dir)?;
     let runtime = tokio::runtime::Runtime::new()?;
