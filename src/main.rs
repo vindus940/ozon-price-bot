@@ -30,7 +30,7 @@ use crate::hunt::{Hunter, Notifier};
 use crate::marketplace::avito::Avito;
 use crate::marketplace::dns::Dns;
 use crate::marketplace::ozon::Ozon;
-use crate::marketplace::{OfferSource, SourceError, SourceKind};
+use crate::marketplace::{OfferSource, SourceError, SourceKind, Throttled};
 use crate::search::OfferSearch;
 use crate::settings::UserSettings;
 use crate::storage::Storage;
@@ -59,9 +59,15 @@ fn main() -> Result<()> {
     let browser = Arc::new(Browser::new(config.browser)?);
     let ozon = Arc::new(Ozon::new(Arc::clone(&browser), config.ozon_portions));
     runtime.spawn(open_ozon(Arc::clone(&ozon)));
-    let ozon: Arc<dyn OfferSource> = ozon;
-    let avito: Arc<dyn OfferSource> = Arc::new(Avito::new(Arc::clone(&browser), settings.avito_region.clone()));
-    let dns: Arc<dyn OfferSource> = Arc::new(Dns::new(browser));
+    let throttled = |source: Arc<dyn OfferSource>, kind: SourceKind| {
+        Arc::new(Throttled::new(source, kind.search_gap())) as Arc<dyn OfferSource>
+    };
+    let ozon = throttled(ozon, SourceKind::Ozon);
+    let avito = throttled(
+        Arc::new(Avito::new(Arc::clone(&browser), settings.avito_region.clone())),
+        SourceKind::Avito,
+    );
+    let dns = throttled(Arc::new(Dns::new(browser)), SourceKind::Dns);
 
     let bot = config.telegram.as_ref().map(|telegram| Bot::new(&telegram.token));
     let owner = config.telegram.as_ref().and_then(|telegram| telegram.owner);

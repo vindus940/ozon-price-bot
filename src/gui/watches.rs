@@ -4,7 +4,8 @@ use eframe::egui::{self, Color32, RichText};
 use super::watch_form::WatchForm;
 use super::{BAD, GOOD, WARN};
 use crate::format::rub;
-use crate::hunt::{Goal, Hunter, Outcome, RunStatus, Watch};
+use crate::hunt::{Goal, Hunter, Outcome, Pause, RunStatus, Watch};
+use crate::marketplace::SourceKind;
 
 pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, form: &mut Option<WatchForm>, pending_delete: &mut Option<u64>) {
     ui.horizontal(|ui| {
@@ -67,7 +68,12 @@ fn card(
             } else {
                 Activity::Waiting
             };
-            let (text, color) = status_line(watch, activity, hunter.run_status(watch.id));
+            let (text, color) = status_line(
+                watch,
+                activity,
+                hunter.run_status(watch.id),
+                hunter.source_pause(watch.source),
+            );
             ui.colored_label(color, text);
         } else {
             ui.colored_label(
@@ -144,8 +150,14 @@ enum Activity {
     Waiting,
 }
 
-/// Строка состояния под слежкой: что происходит сейчас, чем кончилась последняя проверка и когда следующая.
-fn status_line(watch: &Watch, activity: Activity, last_run: Option<RunStatus>) -> (String, Color32) {
+/// Строка состояния под слежкой: что происходит сейчас, чем кончилась последняя проверка и когда следующая —
+/// или почему её площадка на паузе.
+fn status_line(
+    watch: &Watch,
+    activity: Activity,
+    last_run: Option<RunStatus>,
+    pause: Option<Pause>,
+) -> (String, Color32) {
     let normal = Color32::GRAY;
     match activity {
         Activity::Checking => return ("Проверяю прямо сейчас…".into(), GOOD),
@@ -157,23 +169,30 @@ fn status_line(watch: &Watch, activity: Activity, last_run: Option<RunStatus>) -
         }
         Activity::Waiting => {}
     }
+    let paused = pause
+        .filter(|_| watch.enabled)
+        .map(|pause| pause_text(watch.source, pause));
     let Some(run) = last_run else {
-        return if watch.enabled {
-            (
+        return match (watch.enabled, paused) {
+            (false, _) => ("Выключена".into(), normal),
+            (true, Some(paused)) => (format!("Ещё не проверялась.{paused}"), WARN),
+            (true, None) => (
                 "Ещё не проверялась — первая проверка начнётся в течение минуты".into(),
                 normal,
-            )
-        } else {
-            ("Выключена".into(), normal)
+            ),
         };
     };
 
     let at = run.at.format("%H:%M");
-    let next = if watch.enabled {
-        let next = run.at + Duration::minutes(i64::from(watch.every_minutes));
-        format!(" Следующая проверка в {}.", next.format("%H:%M"))
-    } else {
-        String::new()
+    let next = match paused {
+        // У слежки, на которой площадка показала проверку, пауза уже названа в причине сбоя.
+        Some(_) if matches!(run.outcome, Outcome::Failed(_)) => String::new(),
+        Some(paused) => paused,
+        None if watch.enabled => {
+            let next = run.at + Duration::minutes(i64::from(watch.every_minutes));
+            format!(" Следующая проверка в {}.", next.format("%H:%M"))
+        }
+        None => String::new(),
     };
     match run.outcome {
         Outcome::Checked {
@@ -205,6 +224,21 @@ fn status_line(watch: &Watch, activity: Activity, last_run: Option<RunStatus>) -
             WARN,
         ),
         Outcome::Failed(reason) => (format!("{at}: проверка не удалась — {reason}.{next}"), BAD),
+    }
+}
+
+fn pause_text(source: SourceKind, pause: Pause) -> String {
+    match pause {
+        Pause::Until(until) => format!(
+            " Слежки {} на паузе до {} после проверки «я не робот».",
+            source.title(),
+            until.format("%H:%M")
+        ),
+        Pause::UntilManualCheck => format!(
+            " Слежки {} остановлены после трёх проверок «я не робот» подряд — пройдите проверку в окне браузера \
+             программы и нажмите «Проверить сейчас».",
+            source.title()
+        ),
     }
 }
 
@@ -273,11 +307,11 @@ mod tests {
     fn what_happens_now_beats_the_last_result() {
         let last = Some(at_noon(checked(None)));
         assert_eq!(
-            status_line(&drill(), Activity::Checking, last.clone()),
+            status_line(&drill(), Activity::Checking, last.clone(), None),
             ("Проверяю прямо сейчас…".to_string(), GOOD)
         );
         assert!(
-            status_line(&drill(), Activity::Queued, last)
+            status_line(&drill(), Activity::Queued, last, None)
                 .0
                 .starts_with("Встала в очередь")
         );
@@ -286,18 +320,21 @@ mod tests {
     #[test]
     fn never_checked_watch_says_when_it_starts_or_that_it_is_off() {
         assert!(
-            status_line(&drill(), Activity::Waiting, None)
+            status_line(&drill(), Activity::Waiting, None, None)
                 .0
                 .starts_with("Ещё не проверялась")
         );
-        assert_eq!(status_line(&switched_off(), Activity::Waiting, None).0, "Выключена");
+        assert_eq!(
+            status_line(&switched_off(), Activity::Waiting, None, None).0,
+            "Выключена"
+        );
     }
 
     #[test]
     fn checked_watch_shows_market_hidden_fakes_and_next_check() {
         let last = Some(at_noon(checked(Some(MarketPrice::Whole(4_463)))));
         assert_eq!(
-            status_line(&drill(), Activity::Waiting, last),
+            status_line(&drill(), Activity::Waiting, last, None),
             (
                 "12:00: найдено 80, похожих 45, рынок 4\u{a0}463\u{a0}₽, выгодных сейчас 9, новых 2. \
                  Подозрительно дешёвых скрыто: 5. Следующая проверка в 12:15."
@@ -309,16 +346,48 @@ mod tests {
 
     #[test]
     fn too_few_comparables_is_a_warning() {
-        let (text, color) = status_line(&drill(), Activity::Waiting, Some(at_noon(checked(None))));
+        let (text, color) = status_line(&drill(), Activity::Waiting, Some(at_noon(checked(None))), None);
         assert!(text.contains("похожих только 45 — рыночную цену не посчитать"));
         assert_eq!(color, WARN);
+    }
+
+    #[test]
+    fn paused_source_says_until_when_or_asks_for_the_button() {
+        let until = Local.with_ymd_and_hms(2026, 10, 3, 12, 15, 0).unwrap();
+        let checked_before = Some(at_noon(checked(Some(MarketPrice::Whole(4_463)))));
+
+        let (text, _) = status_line(&drill(), Activity::Waiting, checked_before, Some(Pause::Until(until)));
+        assert!(
+            text.ends_with("Слежки Ozon на паузе до 12:15 после проверки «я не робот»."),
+            "{text}"
+        );
+
+        let (text, color) = status_line(&drill(), Activity::Waiting, None, Some(Pause::UntilManualCheck));
+        assert!(text.starts_with("Ещё не проверялась. Слежки Ozon остановлены после трёх проверок"));
+        assert!(text.contains("нажмите «Проверить сейчас»"));
+        assert_eq!(color, WARN);
+
+        let failed = Some(at_noon(Outcome::Failed(
+            "Ozon просит подтвердить, что вы не робот; слежки Ozon подождут до 12:15".into(),
+        )));
+        let (text, _) = status_line(&drill(), Activity::Waiting, failed, Some(Pause::Until(until)));
+        assert_eq!(
+            text.matches("12:15").count(),
+            1,
+            "у упавшей слежки пауза уже в причине: {text}"
+        );
+
+        assert_eq!(
+            status_line(&switched_off(), Activity::Waiting, None, Some(Pause::UntilManualCheck)).0,
+            "Выключена"
+        );
     }
 
     #[test]
     fn failed_check_of_switched_off_watch_has_no_next_time() {
         let last = Some(at_noon(Outcome::Failed("Авито просит проверку".into())));
         assert_eq!(
-            status_line(&switched_off(), Activity::Waiting, last),
+            status_line(&switched_off(), Activity::Waiting, last, None),
             ("12:00: проверка не удалась — Авито просит проверку.".to_string(), BAD)
         );
     }

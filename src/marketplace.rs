@@ -2,6 +2,11 @@ pub mod avito;
 pub mod dns;
 pub mod ozon;
 mod page;
+mod throttle;
+
+pub use throttle::Throttled;
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Url;
@@ -36,6 +41,16 @@ impl SourceKind {
             SourceKind::Ozon => 5,
             SourceKind::Avito | SourceKind::Dns => 15,
         }
+    }
+
+    /// Самое частое, с чем площадка мирится без проверки «я не робот», — общий предел для слежек, бота
+    /// и самопроверки. Один поиск Ozon — это ещё и до десятка порций выдачи, Авито и ДНС открывают страницы целиком.
+    pub fn search_gap(self) -> Duration {
+        let searches_per_minute = match self {
+            SourceKind::Ozon => 4,
+            SourceKind::Avito | SourceKind::Dns => 2,
+        };
+        Duration::from_mins(1) / searches_per_minute
     }
 
     /// Радиусы, которые площадка умеет искать вокруг точки и для которых пишет расстояние до объявления.

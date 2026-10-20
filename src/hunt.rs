@@ -35,7 +35,7 @@ use market::MIN_SAMPLE;
 pub use market::{MarketPrice, PerUnit};
 use memory::Notified;
 use schedule::Schedule;
-pub use schedule::{Outcome, RunStatus};
+pub use schedule::{Outcome, Pause, RunStatus};
 pub use trial::TrialStatus;
 use trial::Trials;
 pub use watch::{Goal, Watch};
@@ -178,6 +178,11 @@ impl Hunter {
 
     pub fn is_queued(&self, watch_id: u64) -> bool {
         self.state().schedule.is_queued(watch_id)
+    }
+
+    /// Ждут ли слежки площадки после проверки «я не робот».
+    pub fn source_pause(&self, source: SourceKind) -> Option<Pause> {
+        self.state().schedule.pause(source, Local::now())
     }
 
     /// Новая слежка (id = 0) или правка существующей. Правка начинает слежку заново:
@@ -360,41 +365,56 @@ impl Hunter {
         };
         match self.search(&watch).await {
             Ok(offers) => {
+                self.state().schedule.source_answered(watch.source);
                 let assessment = assess(&watch, offers, Local::now());
                 if let Some((first_run, news)) = self.record(&watch, &assessment) {
                     self.alert(&watch, first_run, &news).await;
                 }
             }
-            Err(reason) => self.fail(&watch, reason).await,
+            Err(CheckError::Source(SourceError::Captcha)) => {
+                let pause = self.state().schedule.captcha(watch.source, Local::now());
+                let reason = format!(
+                    "{}; {}",
+                    failure_reason(watch.source.title(), &SourceError::Captcha),
+                    pause_note(watch.source, pause)
+                );
+                self.fail(&watch, reason).await;
+            }
+            Err(error) => self.fail(&watch, error.reason(watch.source)).await,
         }
     }
 
+    /// Пробная проверка паузу площадки не трогает: вы смотрите на окно и сами видите, что просит площадка.
     async fn try_out(&self, number: u64, watch: &Watch) {
         let status = match self.search(watch).await {
             Ok(offers) => TrialStatus::Done(assess(watch, offers, Local::now())),
-            Err(reason) => TrialStatus::Failed(reason),
+            Err(error) => TrialStatus::Failed(error.reason(watch.source)),
         };
         self.state().trials.finish(number, status);
     }
 
-    /// Всё найденное по слежке на её площадке или понятная причина, почему не получилось.
-    async fn search(&self, watch: &Watch) -> Result<Vec<Offer>, String> {
+    async fn search(&self, watch: &Watch) -> Result<Vec<Offer>, CheckError> {
         let Some(source) = self.sources.get(&watch.source) else {
-            return Err(format!(
+            return Err(CheckError::Setup(format!(
                 "{} ещё не подключено — нужна разовая настройка",
                 watch.source.title()
-            ));
+            )));
         };
         let home = self.state().home;
         if watch.radius_km.is_some() && home.is_none() {
-            return Err("не указан дом — укажите его координаты в «Настройках»".into());
+            return Err(CheckError::Setup(
+                "не указан дом — укажите его координаты в «Настройках»".into(),
+            ));
         }
         let area = watch.search_area(home);
         let found = match watch.link.as_deref() {
-            Some(link) => source.search_link(&watch.source.parse_link(link)?, area).await,
+            Some(link) => {
+                let link = watch.source.parse_link(link).map_err(CheckError::Setup)?;
+                source.search_link(&link, area).await
+            }
             None => source.search(&watch.query, area).await,
         };
-        found.map_err(|error| failure_reason(watch.source.title(), &error))
+        found.map_err(CheckError::Source)
     }
 
     /// Сверяет находки с памятью и запоминает их. `None` — слежку успели изменить или удалить, пока шла проверка.
@@ -482,6 +502,31 @@ fn summary(watch: &Watch, assessment: &Assessment, news: usize) -> String {
         None => format!(
             "«{}»: найдено {}, похожих {} — меньше {MIN_SAMPLE}, рыночную цену не посчитать; уточните запрос или категорию",
             watch.name, assessment.scanned, assessment.comparable
+        ),
+    }
+}
+
+/// Почему проверка не удалась: не с чем было идти на площадку — или площадка ответила ошибкой.
+enum CheckError {
+    Setup(String),
+    Source(SourceError),
+}
+
+impl CheckError {
+    fn reason(&self, source: SourceKind) -> String {
+        match self {
+            CheckError::Setup(reason) => reason.clone(),
+            CheckError::Source(error) => failure_reason(source.title(), error),
+        }
+    }
+}
+
+fn pause_note(source: SourceKind, pause: Pause) -> String {
+    match pause {
+        Pause::Until(until) => format!("слежки {} подождут до {}", source.title(), until.format("%H:%M")),
+        Pause::UntilManualCheck => format!(
+            "это третья такая проверка подряд: слежки {} остановлены, пока вы не нажмёте «Проверить сейчас»",
+            source.title()
         ),
     }
 }
@@ -684,6 +729,35 @@ mod tests {
             hunter.run_status(id).map(|run| run.outcome),
             Some(Outcome::Failed(reason)) if reason.contains("пройдите проверку в окне браузера программы")
         ));
+    }
+
+    #[tokio::test]
+    async fn captchas_in_a_row_stop_the_source_until_the_button_and_success_lifts_it() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("captcha-pause");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        let reason = |hunter: &Hunter| match hunter.run_status(id).map(|run| run.outcome) {
+            Some(Outcome::Failed(reason)) => reason,
+            other => panic!("ждали сбой, а не {other:?}"),
+        };
+
+        source.captcha.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+        assert!(matches!(hunter.source_pause(SourceKind::Ozon), Some(Pause::Until(_))));
+        assert!(reason(&hunter).contains("пройдите проверку в окне браузера программы; слежки Ozon подождут до"));
+        hunter.check(id).await;
+        hunter.check(id).await;
+        assert_eq!(hunter.source_pause(SourceKind::Ozon), Some(Pause::UntilManualCheck));
+        assert!(reason(&hunter).contains("остановлены, пока вы не нажмёте «Проверить сейчас»"));
+        assert_eq!(alerts(&notifier), ["failed"], "о сбое — одно сообщение");
+
+        hunter.run_now(id);
+        assert_eq!(hunter.next_to_check(), Some(id), "кнопка обходит паузу");
+        source.captcha.store(false, Ordering::SeqCst);
+        hunter.check(id).await;
+        assert_eq!(hunter.source_pause(SourceKind::Ozon), None);
     }
 
     #[tokio::test]
