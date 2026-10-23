@@ -1,6 +1,7 @@
 mod devtools;
 
-use std::path::PathBuf;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -11,16 +12,44 @@ use devtools::DevTools;
 pub use devtools::Tab;
 
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
+const EDGE: &str = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe";
+/// Куда Chrome ставит установщик: для всех пользователей или только для текущего.
+const CHROME_HOMES: [&str; 3] = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"];
+
+/// Chrome, если он установлен, иначе Edge — он есть в каждой Windows.
+pub fn installed_browser() -> PathBuf {
+    CHROME_HOMES
+        .iter()
+        .filter_map(env::var_os)
+        .map(|home| PathBuf::from(home).join(r"Google\Chrome\Application\chrome.exe"))
+        .find(|chrome| chrome.exists())
+        .unwrap_or_else(|| PathBuf::from(EDGE))
+}
+
+/// Папка профиля — своя у каждого браузера: Chrome не открывает профиль Edge. У Edge она называется, как раньше,
+/// `browser-profile`: в ней пройденные проверки «я не робот» и выбранный город ДНС.
+pub fn profile_name(executable: &Path) -> String {
+    let browser = executable
+        .file_stem()
+        .map_or_else(String::new, |stem| stem.to_string_lossy().to_lowercase());
+    match browser.as_str() {
+        "msedge" => "browser-profile".into(),
+        // Яндекс.Браузер — это browser.exe: по общему правилу его профиль совпал бы с профилем Edge.
+        "browser" => "yandex-profile".into(),
+        other => format!("{other}-profile"),
+    }
+}
 
 /// Отдельный браузер для живых тестов: свой порт и профиль в `target`, чтобы не трогать окно программы.
 #[cfg(test)]
 pub fn test_browser() -> std::sync::Arc<Browser> {
+    let executable = installed_browser();
     let settings = BrowserSettings {
-        executable: crate::config::DEFAULT_BROWSER.into(),
-        debug_port: 9333,
-        profile_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        profile_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
-            .join("test-browser-profile"),
+            .join(format!("test-{}", profile_name(&executable))),
+        executable,
+        debug_port: 9333,
     };
     std::sync::Arc::new(Browser::new(settings).expect("тестовый браузер не создался"))
 }
@@ -75,8 +104,9 @@ impl Browser {
             .arg(format!("--remote-debugging-port={}", self.settings.debug_port))
             .arg(format!("--user-data-dir={}", self.settings.profile_dir.display()))
             .arg("--no-first-run")
-            // Окно браузера программы обычно свёрнуто или закрыто другими окнами, а в скрытых вкладках Edge растягивает
-            // таймеры — через пять минут до раза в минуту. На паузах между порциями Ozon поиск не укладывался в 120 секунд.
+            .arg("--no-default-browser-check")
+            // Окно браузера программы обычно свёрнуто или закрыто другими окнами, а в скрытых вкладках браузер растягивает
+            // таймеры — через пять минут до раза в минуту, а паузы между порциями Ozon стоят на таймерах.
             .args([
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
@@ -89,5 +119,28 @@ impl Browser {
             .spawn()
             .with_context(|| format!("не удалось запустить браузер {}", self.settings.executable.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_browser_has_its_own_profile_and_edge_keeps_the_old_one() {
+        let name = |path: &str| profile_name(Path::new(path));
+        assert_eq!(
+            name(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            "chrome-profile"
+        );
+        assert_eq!(
+            name(EDGE),
+            "browser-profile",
+            "пройденные проверки и город ДНС остаются у Edge"
+        );
+        assert_eq!(
+            name(r"C:\Users\me\AppData\Local\Yandex\YandexBrowser\Application\browser.exe"),
+            "yandex-profile"
+        );
     }
 }

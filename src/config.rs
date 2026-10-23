@@ -5,12 +5,11 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 
-use crate::browser::BrowserSettings;
+use crate::browser::{self, BrowserSettings};
 use crate::health::SelfCheckSettings;
 use crate::settings::UserSettings;
 use crate::telegram::TelegramSettings;
 
-pub(crate) const DEFAULT_BROWSER: &str = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe";
 const DEFAULT_SELF_CHECK_QUERY: &str = "наушники";
 
 pub struct Config {
@@ -32,6 +31,9 @@ impl Config {
             .filter(|token| !token.is_empty())
             .or_else(|| env::var("TELEGRAM_TOKEN").ok().filter(|token| !token.trim().is_empty()));
         let top = number("TOP", 10)?;
+        let executable = env::var_os("BROWSER_PATH")
+            .filter(|path| !path.is_empty())
+            .map_or_else(browser::installed_browser, PathBuf::from);
 
         Ok(Self {
             telegram: token.map(|token| TelegramSettings {
@@ -41,11 +43,9 @@ impl Config {
                 top,
             }),
             browser: BrowserSettings {
-                executable: env::var("BROWSER_PATH")
-                    .unwrap_or_else(|_| DEFAULT_BROWSER.into())
-                    .into(),
+                profile_dir: app_dir.join(browser::profile_name(&executable)),
+                executable,
                 debug_port: number("DEBUG_PORT", 9222)?,
-                profile_dir: app_dir.join("browser-profile"),
             },
             ozon_portions: number("PORTIONS", 10)?,
             self_check: self_check()?,
