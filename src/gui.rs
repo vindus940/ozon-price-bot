@@ -1,4 +1,5 @@
 mod deals;
+mod history;
 mod journal;
 mod settings_tab;
 mod trial;

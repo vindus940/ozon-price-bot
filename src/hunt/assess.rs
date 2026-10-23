@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Local};
 
 use crate::hunt::category::looks_used;
-use crate::hunt::deal::{Deal, evaluate, within_radius};
+use crate::hunt::deal::{Deal, evaluate, suspiciously_cheap, within_radius};
 use crate::hunt::market::{Market, MarketPrice, Pricing};
 use crate::hunt::watch::Watch;
 use crate::offer::Offer;
@@ -15,6 +15,9 @@ pub struct Assessment {
     pub scanned: usize,
     pub comparable: usize,
     pub market: Option<MarketPrice>,
+    /// Самая низкая цена похожих, кроме подозрительно дешёвых: «за полцены» — не цена рынка, а подделка или обман.
+    /// Есть, когда есть рынок.
+    pub lowest: Option<MarketPrice>,
     /// Выгодные: сначала с наибольшей выгодой перепродажи, потом с наибольшей скидкой.
     pub suitable: Vec<Deal>,
     pub hidden_suspicious: usize,
@@ -47,6 +50,7 @@ impl Assessment {
             scanned,
             comparable,
             market: None,
+            lowest: None,
             suitable: Vec::new(),
             hidden_suspicious: 0,
             sifted,
@@ -94,6 +98,11 @@ pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assess
     let Some(market) = Market::of(&prices) else {
         return Assessment::without_market(scanned, comparable, sifted);
     };
+    let lowest = prices
+        .iter()
+        .copied()
+        .filter(|&price| !suspiciously_cheap(market.median, price))
+        .min();
 
     let wanted = OfferFilter::new(&watch.candidates_request());
     let mut deals = Vec::new();
@@ -136,7 +145,8 @@ pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assess
     Assessment {
         scanned,
         comparable,
-        market: Some(pricing.market_price(market)),
+        market: Some(pricing.price(market.median)),
+        lowest: lowest.map(|price| pricing.price(price)),
         suitable,
         hidden_suspicious: suspicious.len(),
         sifted,
@@ -260,6 +270,11 @@ mod tests {
             [58_000]
         );
         assert_eq!(cautious.hidden_suspicious, 1);
+        assert_eq!(
+            cautious.lowest,
+            Some(MarketPrice::Whole(58_000)),
+            "«за полцены» не считается самой низкой ценой рынка"
+        );
 
         let curious = Watch {
             include_suspicious: true,
@@ -382,6 +397,7 @@ mod tests {
         );
         assert_eq!(assessment.sifted.no_unit_price, 2);
         assert_eq!(assessment.market.unwrap().to_string(), "320\u{a0}₽/кг");
+        assert_eq!(assessment.lowest.unwrap().to_string(), "230\u{a0}₽/кг");
         let [deal] = assessment.suitable.as_slice() else {
             panic!("выгодной должна быть одна пачка 9 кг, а не самая дешёвая на 450 г");
         };

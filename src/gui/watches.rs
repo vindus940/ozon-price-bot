@@ -75,6 +75,7 @@ fn card(
                 hunter.source_pause(watch.source),
             );
             ui.colored_label(color, text);
+            super::history::show(ui, watch.id, &hunter.market_history(watch.id));
         } else {
             ui.colored_label(
                 WARN,

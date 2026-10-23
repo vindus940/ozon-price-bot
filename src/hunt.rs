@@ -5,6 +5,7 @@ mod deal;
 mod feed;
 #[cfg(test)]
 mod fixtures;
+mod history;
 mod journal;
 mod market;
 mod memory;
@@ -27,12 +28,15 @@ use book::WatchBook;
 pub use category::Category;
 pub use deal::{Deal, Miss};
 use feed::Feed;
+use history::History;
+pub use history::{Lowest, MarketPoint};
 use journal::Journal;
 pub use journal::JournalEntry;
 use market::MIN_SAMPLE;
-/// По имени нужны только тестам текстов: остальной код берёт их из находки и итога проверки.
+pub use market::MarketPrice;
+/// По имени нужна только тестам текстов: остальной код берёт её из находки.
 #[cfg(test)]
-pub use market::{MarketPrice, PerUnit};
+pub use market::PerUnit;
 use memory::Notified;
 use schedule::Schedule;
 pub use schedule::{Outcome, Pause, RunStatus};
@@ -47,15 +51,18 @@ use crate::storage::Storage;
 
 const SCHEDULE_TICK: Duration = Duration::from_secs(30);
 
+/// `lowest` — самая низкая цена похожих за прошлые проверки (до 30 дней): с ней сравнивается каждая находка.
 pub enum Alert<'a> {
     /// Первая проверка слежки: что подходит прямо сейчас. Дальше — только новое.
     Started {
         watch: &'a Watch,
         deals: &'a [Deal],
+        lowest: Option<Lowest>,
     },
     NewDeals {
         watch: &'a Watch,
         deals: &'a [Deal],
+        lowest: Option<Lowest>,
     },
     /// Слежка перестала работать. Приходит один раз, а не при каждой неудачной проверке.
     Failed {
@@ -77,6 +84,7 @@ struct State {
     schedule: Schedule,
     feed: Feed,
     notified: Notified,
+    history: History,
     journal: Journal,
     trials: Trials,
     home: Option<GeoPoint>,
@@ -93,6 +101,10 @@ impl State {
 
     fn save_notified(&mut self, storage: &Storage) {
         save(storage, &mut self.journal, memory::FILE, &self.notified);
+    }
+
+    fn save_history(&mut self, storage: &Storage) {
+        save(storage, &mut self.journal, history::FILE, &self.history);
     }
 }
 
@@ -126,6 +138,7 @@ impl Hunter {
             schedule: Schedule::default(),
             feed: storage.load(feed::FILE),
             notified: storage.load(memory::FILE),
+            history: storage.load(history::FILE),
             journal: Journal::default(),
             trials: Trials::default(),
             home,
@@ -160,6 +173,11 @@ impl Hunter {
         self.state().journal.entries()
     }
 
+    /// История рынка слежки для графика: точка в час, старые первыми.
+    pub fn market_history(&self, watch_id: u64) -> Vec<MarketPoint> {
+        self.state().history.points(watch_id)
+    }
+
     pub fn home(&self) -> Option<GeoPoint> {
         self.state().home
     }
@@ -186,7 +204,7 @@ impl Hunter {
     }
 
     /// Новая слежка (id = 0) или правка существующей. Правка начинает слежку заново:
-    /// старая память об отправленном относится к другим условиям.
+    /// старая память об отправленном относится к другим условиям. История рынка остаётся, если рынок тот же.
     pub fn save_watch(&self, watch: Watch) -> Result<u64, Vec<String>> {
         let mut state = self.state();
         let problems = watch.problems(state.home.is_some());
@@ -194,12 +212,17 @@ impl Hunter {
             return Err(problems);
         }
         let name = watch.name.clone();
+        let other_market = state.book.get(watch.id).is_some_and(|old| !old.same_market(&watch));
         let watch_id = state.book.save(watch).map_err(|problem| vec![problem])?;
         state.notified.forget(watch_id);
         state.schedule.forget(watch_id);
         state.journal.write(format!("Слежка «{name}» сохранена"));
         state.save_watches(&self.storage);
         state.save_notified(&self.storage);
+        if other_market {
+            state.history.forget(watch_id);
+            state.save_history(&self.storage);
+        }
         drop(state);
         self.wake.notify_one();
         Ok(watch_id)
@@ -212,9 +235,11 @@ impl Hunter {
         };
         state.notified.forget_watch(watch_id);
         state.schedule.forget(watch_id);
+        state.history.forget(watch_id);
         state.journal.write(format!("Слежка «{}» удалена", watch.name));
         state.save_watches(&self.storage);
         state.save_notified(&self.storage);
+        state.save_history(&self.storage);
     }
 
     pub fn set_enabled(&self, watch_id: u64, enabled: bool) {
@@ -367,8 +392,8 @@ impl Hunter {
             Ok(offers) => {
                 self.state().schedule.source_answered(watch.source);
                 let assessment = assess(&watch, offers, Local::now());
-                if let Some((first_run, news)) = self.record(&watch, &assessment) {
-                    self.alert(&watch, first_run, &news).await;
+                if let Some((first_run, news, lowest)) = self.record(&watch, &assessment) {
+                    self.alert(&watch, first_run, &news, lowest).await;
                 }
             }
             Err(CheckError::Source(SourceError::Captcha)) => {
@@ -417,15 +442,30 @@ impl Hunter {
         found.map_err(CheckError::Source)
     }
 
-    /// Сверяет находки с памятью и запоминает их. `None` — слежку успели изменить или удалить, пока шла проверка.
-    fn record(&self, watch: &Watch, assessment: &Assessment) -> Option<(bool, Vec<Deal>)> {
+    /// Сверяет находки с памятью и запоминает их и рынок. Вместе с новыми находками отдаёт самую низкую цену
+    /// прошлых проверок — до этой. `None` — слежку успели изменить или удалить, пока шла проверка.
+    fn record(&self, watch: &Watch, assessment: &Assessment) -> Option<(bool, Vec<Deal>, Option<Lowest>)> {
         let mut state = self.state();
         if !state.book.still_has(watch) {
             return None;
         }
 
+        let now = Local::now();
         let first_run = state.notified.is_first_run(watch.id);
         let news = state.notified.take_news(watch.id, &assessment.suitable);
+        let lowest_before = assessment
+            .market
+            .and_then(|market| state.history.lowest(watch.id, now, market.unit()));
+        if let (Some(market), Some(lowest)) = (assessment.market, assessment.lowest) {
+            let point = MarketPoint {
+                at: now,
+                market,
+                lowest,
+                comparable: assessment.comparable,
+            };
+            state.history.record(watch.id, point);
+            state.save_history(&self.storage);
+        }
         state.feed.add(&news);
         state.journal.write(summary(watch, assessment, news.len()));
         let outcome = Outcome::Checked {
@@ -436,10 +476,10 @@ impl Hunter {
             news: news.len(),
             hidden_suspicious: assessment.hidden_suspicious,
         };
-        state.schedule.record(watch.id, Local::now(), outcome);
+        state.schedule.record(watch.id, now, outcome);
         state.save_deals(&self.storage);
         state.save_notified(&self.storage);
-        Some((first_run, news))
+        Some((first_run, news, lowest_before))
     }
 
     /// Запоминает неудачу и сообщает о ней, только если до этого слежка работала.
@@ -463,14 +503,22 @@ impl Hunter {
         }
     }
 
-    async fn alert(&self, watch: &Watch, first_run: bool, news: &[Deal]) {
+    async fn alert(&self, watch: &Watch, first_run: bool, news: &[Deal], lowest: Option<Lowest>) {
         let Some(notifier) = &self.notifier else { return };
         let alert = if first_run {
-            Alert::Started { watch, deals: news }
+            Alert::Started {
+                watch,
+                deals: news,
+                lowest,
+            }
         } else if news.is_empty() {
             return;
         } else {
-            Alert::NewDeals { watch, deals: news }
+            Alert::NewDeals {
+                watch,
+                deals: news,
+                lowest,
+            }
         };
         if let Err(error) = notifier.notify(alert).await {
             let mut state = self.state();
@@ -553,6 +601,7 @@ mod tests {
     use crate::hunt::fixtures::{iphone_watch, market_offers, phone};
     use crate::marketplace::Area;
     use crate::offer::Offer;
+    use crate::search::PriceRange;
 
     #[derive(Default)]
     struct ChangingSource {
@@ -592,6 +641,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingNotifier {
         alerts: StdMutex<Vec<String>>,
+        lowest: StdMutex<Vec<Option<MarketPrice>>>,
         offline: AtomicBool,
     }
 
@@ -600,6 +650,9 @@ mod tests {
         async fn notify(&self, alert: Alert<'_>) -> anyhow::Result<()> {
             if self.offline.load(Ordering::SeqCst) {
                 anyhow::bail!("нет сети");
+            }
+            if let Alert::Started { lowest, .. } | Alert::NewDeals { lowest, .. } = &alert {
+                self.lowest.lock().unwrap().push(lowest.map(|lowest| lowest.price));
             }
             let text = match alert {
                 Alert::Started { deals, .. } => format!("started:{}", deals.len()),
@@ -686,6 +739,72 @@ mod tests {
         let reloaded = Hunter::new(HashMap::new(), None, storage.clone(), None);
         assert_eq!(reloaded.watches().len(), 1);
         assert_eq!(reloaded.deals().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn market_history_survives_restart_and_filter_edits_but_not_another_query() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("history");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+
+        hunter.check(id).await;
+        source.offers.lock().unwrap().push(phone(58_000));
+        hunter.check(id).await;
+
+        assert_eq!(
+            *notifier.lowest.lock().unwrap(),
+            [None, Some(MarketPrice::Whole(70_000))],
+            "находку сравнивают с прошлыми проверками, а не с ней самой"
+        );
+        let last = |hunter: &Hunter| {
+            hunter
+                .market_history(id)
+                .last()
+                .map(|point| (point.market, point.lowest))
+        };
+        assert_eq!(
+            last(&hunter),
+            Some((MarketPrice::Whole(72_000), MarketPrice::Whole(58_000)))
+        );
+        let reloaded = Hunter::new(HashMap::new(), None, storage.clone(), None);
+        assert_eq!(last(&reloaded), last(&hunter));
+
+        let cheaper_only = Watch {
+            id,
+            price: PriceRange {
+                min: None,
+                max: Some(60_000),
+            },
+            ..iphone_watch()
+        };
+        hunter.save_watch(cheaper_only).unwrap();
+        assert!(!hunter.market_history(id).is_empty(), "фильтр цены рынок не меняет");
+
+        let other_phone = Watch {
+            id,
+            query: "iphone 16 128".into(),
+            ..iphone_watch()
+        };
+        hunter.save_watch(other_phone).unwrap();
+        assert!(hunter.market_history(id).is_empty());
+        assert!(
+            Hunter::new(HashMap::new(), None, storage.clone(), None)
+                .market_history(id)
+                .is_empty()
+        );
+
+        hunter.save_watch(Watch { id, ..iphone_watch() }).unwrap();
+        hunter.check(id).await;
+        assert!(!hunter.market_history(id).is_empty());
+        hunter.delete_watch(id);
+        assert!(
+            Hunter::new(HashMap::new(), None, storage.clone(), None)
+                .market_history(id)
+                .is_empty(),
+            "удалённая слежка уносит историю с собой"
+        );
     }
 
     #[tokio::test]

@@ -177,6 +177,23 @@ impl Watch {
         }
     }
 
+    /// Тот же ли рынок у слежки после правки: история рынка говорит о том, что ищется и где. Цена, рейтинг,
+    /// цель и частота рынок не меняют; стоп-слова только уточняют тот же товар — их и подсказка «мимо» добавляет
+    /// без перезапуска.
+    pub fn same_market(&self, other: &Watch) -> bool {
+        let market = |watch: &Watch| {
+            (
+                watch.source,
+                watch.category,
+                watch.query.clone(),
+                watch.link.clone(),
+                watch.new_only,
+                watch.radius_km.is_some(),
+            )
+        };
+        market(self) == market(other)
+    }
+
     pub fn is_due(&self, last_run: Option<DateTime<Local>>, now: DateTime<Local>) -> bool {
         self.enabled && last_run.is_none_or(|last| now - last >= Duration::minutes(i64::from(self.every_minutes)))
     }
@@ -360,6 +377,51 @@ mod tests {
         assert_eq!(picky.comparables_request().min_rating, None);
         assert_eq!(picky.candidates_request().price.max, Some(60_000));
         assert_eq!(picky.candidates_request().excluded, ["восстановленный"]);
+    }
+
+    #[test]
+    fn market_changes_with_what_is_searched_not_with_your_filters() {
+        let stricter = Watch {
+            price: PriceRange {
+                min: None,
+                max: Some(60_000),
+            },
+            goal: Goal::BelowMarket {
+                min_discount_percent: 30,
+            },
+            stop_words: vec!["восстановленный".into()],
+            every_minutes: 60,
+            ..watch()
+        };
+        assert!(watch().same_market(&stricter));
+
+        let other_query = Watch {
+            query: "iphone 16 128".into(),
+            ..watch()
+        };
+        let by_link = Watch {
+            link: Some("https://www.ozon.ru/category/smartfony-15502/?delivery=2".into()),
+            ..watch()
+        };
+        assert!(!watch().same_market(&other_query));
+        assert!(!watch().same_market(&by_link));
+
+        let anywhere = Watch {
+            radius_km: None,
+            ..drill_for_resale()
+        };
+        let farther = Watch {
+            radius_km: Some(10),
+            ..drill_for_resale()
+        };
+        assert!(
+            !drill_for_resale().same_market(&anywhere),
+            "рядом с домом рынок ищется вокруг дома"
+        );
+        assert!(
+            drill_for_resale().same_market(&farther),
+            "а вокруг дома — всегда в самом большом радиусе"
+        );
     }
 
     #[test]

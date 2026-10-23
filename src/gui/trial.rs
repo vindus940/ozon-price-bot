@@ -146,6 +146,7 @@ mod tests {
             scanned: 50,
             comparable: 32,
             market: Some(MarketPrice::Whole(72_000)),
+            lowest: Some(MarketPrice::Whole(55_000)),
             suitable: vec![deal; suitable],
             hidden_suspicious: 2,
             sifted,

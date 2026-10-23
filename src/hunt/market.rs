@@ -47,10 +47,39 @@ pub enum Pricing {
 }
 
 /// Рыночная цена в том виде, в каком её сравнивали: «4 446 ₽» или «310 ₽/кг».
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum MarketPrice {
     Whole(u64),
     PerUnit(UnitPrice),
+}
+
+impl MarketPrice {
+    /// Число для сравнения и графика: рубли за предложение или копейки за единицу.
+    pub fn amount(self) -> u64 {
+        match self {
+            Self::Whole(rubles) => rubles,
+            Self::PerUnit(price) => price.kopecks,
+        }
+    }
+
+    /// За что цена: `None` — за предложение целиком. Сравнивать можно только цены за одно и то же.
+    pub fn unit(self) -> Option<Unit> {
+        match self {
+            Self::Whole(_) => None,
+            Self::PerUnit(price) => Some(price.unit),
+        }
+    }
+
+    /// Другая цена за то же самое — например, деление на оси графика.
+    pub fn with_amount(self, amount: u64) -> Self {
+        match self {
+            Self::Whole(_) => Self::Whole(amount),
+            Self::PerUnit(price) => Self::PerUnit(UnitPrice {
+                kopecks: amount,
+                ..price
+            }),
+        }
+    }
 }
 
 /// Для расходников: цена предложения и рынка за единицу — их показывают рядом с ценой пачки.
@@ -79,13 +108,11 @@ impl Pricing {
         }
     }
 
-    pub fn market_price(self, market: Market) -> MarketPrice {
+    /// Цена в единицах сравнения (`comparable_price`, медиана рынка) — в том виде, в каком её показывают.
+    pub fn price(self, amount: u64) -> MarketPrice {
         match self {
-            Self::Whole => MarketPrice::Whole(market.median),
-            Self::PerUnit(unit) => MarketPrice::PerUnit(UnitPrice {
-                kopecks: market.median,
-                unit,
-            }),
+            Self::Whole => MarketPrice::Whole(amount),
+            Self::PerUnit(unit) => MarketPrice::PerUnit(UnitPrice { kopecks: amount, unit }),
         }
     }
 
@@ -186,7 +213,7 @@ mod tests {
 
         assert_eq!(same_amount.median, 1800);
         assert_eq!(per_unit.unwrap().price.to_string(), "233\u{a0}₽/кг");
-        assert_eq!(pricing.market_price(market).to_string(), "300\u{a0}₽/кг");
+        assert_eq!(pricing.price(market.median).to_string(), "300\u{a0}₽/кг");
         assert_eq!(
             Pricing::Whole.market_for(market, &Offer::sample("Порошок 6 кг", 1400)),
             (market, None)

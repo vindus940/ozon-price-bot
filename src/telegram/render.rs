@@ -1,6 +1,6 @@
 use crate::format::{rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
-use crate::hunt::{Alert, Deal, Goal, Watch};
+use crate::hunt::{Alert, Deal, Goal, Lowest, Watch};
 use crate::marketplace::SourceError;
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
@@ -243,12 +243,12 @@ fn price_condition(range: PriceRange) -> Option<String> {
 pub(super) fn alert(alert: &Alert<'_>) -> String {
     match alert {
         Alert::Test => "Проверка связи: сюда будут приходить выгодные находки ваших слежек.".to_string(),
-        Alert::Started { watch, deals: [] } => format!(
+        Alert::Started { watch, deals: [], .. } => format!(
             "🔎 Слежка «{}» запущена ({}). Сейчас подходящих нет — напишу, как только появятся.",
             escape(&watch.name),
             goal_summary(watch)
         ),
-        Alert::Started { watch, deals } => deals_message(
+        Alert::Started { watch, deals, lowest } => deals_message(
             &format!(
                 "🔎 Слежка «{}» запущена ({}). Подходит прямо сейчас: {}. Дальше буду писать только о новых.",
                 escape(&watch.name),
@@ -256,14 +256,16 @@ pub(super) fn alert(alert: &Alert<'_>) -> String {
                 deals.len()
             ),
             deals,
+            *lowest,
         ),
-        Alert::NewDeals { watch, deals } => deals_message(
+        Alert::NewDeals { watch, deals, lowest } => deals_message(
             &format!(
                 "🔔 «{}»: новые выгодные предложения — {}",
                 escape(&watch.name),
                 deals.len()
             ),
             deals,
+            *lowest,
         ),
         Alert::Failed { watch, reason } => format!(
             "⚠️ Слежка «{}» не смогла проверить {}: {}.\nПока это не исправлено, новых находок не будет. \
@@ -288,11 +290,11 @@ fn goal_summary(watch: &Watch) -> String {
 }
 
 /// Сколько находок влезает в одно сообщение — столько и показываем, остальные ждут в программе.
-fn deals_message(header: &str, deals: &[Deal]) -> String {
+fn deals_message(header: &str, deals: &[Deal], lowest: Option<Lowest>) -> String {
     let mut length = header.chars().count();
     let entries: Vec<String> = deals
         .iter()
-        .map(deal_entry)
+        .map(|deal| deal_entry(deal, lowest))
         .take_while(|entry| {
             length += entry.chars().count();
             length <= MESSAGE_LIMIT - 100
@@ -307,11 +309,12 @@ fn deals_message(header: &str, deals: &[Deal]) -> String {
     format!("{header}{}{tail}", entries.concat())
 }
 
-fn deal_entry(deal: &Deal) -> String {
+fn deal_entry(deal: &Deal, lowest: Option<Lowest>) -> String {
     let resale = deal
         .resale_profit
         .map(|profit| format!("\nНа перепродаже ≈ {} выгоды", signed_rub(profit)))
         .unwrap_or_default();
+    let history = history_line(deal, lowest);
     let whereabouts = whereabouts(&deal.offer);
     let whereabouts = if whereabouts.is_empty() {
         String::new()
@@ -330,13 +333,34 @@ fn deal_entry(deal: &Deal) -> String {
         None => (String::new(), rub(deal.market_price)),
     };
     format!(
-        "\n\n<b>{price}</b>{unit_price} — на {discount}% ниже рынка ({market}, по {sample} похожим){resale}{whereabouts}{marks}{warning}\n<a href=\"{url}\">{name}</a>",
+        "\n\n<b>{price}</b>{unit_price} — на {discount}% ниже рынка ({market}, по {sample} похожим){resale}{history}{whereabouts}{marks}{warning}\n<a href=\"{url}\">{name}</a>",
         price = rub(deal.offer.price),
         discount = deal.discount_percent,
         sample = deal.market_sample,
         url = escape(&deal.offer.url),
         name = escape(&shorten(&deal.offer.name, NAME_LIMIT)),
     )
+}
+
+/// Скидка к рынку бывает и у цены, которая месяц назад была ниже: находку сравниваем ещё и с самой низкой
+/// ценой похожих за прошлые проверки — настоящей историей, а не зачёркнутой ценой магазина.
+fn history_line(deal: &Deal, lowest: Option<Lowest>) -> String {
+    let Some(lowest) = lowest else {
+        return String::new();
+    };
+    let since = lowest.since.format("%d.%m");
+    match lowest.beaten_by(deal.compared_price()) {
+        Some(true) => format!(
+            "\n📉 Самая низкая цена с {since}: раньше не опускалась ниже {}",
+            lowest.price
+        ),
+        Some(false) => format!(
+            "\nС {since} бывало и дешевле: {} ({})",
+            lowest.price,
+            lowest.at.format("%d.%m")
+        ),
+        None => String::new(),
+    }
 }
 
 /// Отдельной строкой под предложением, если с плитки что-то известно.
@@ -376,9 +400,10 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use chrono::{Local, TimeZone};
 
     use super::*;
-    use crate::hunt::PerUnit;
+    use crate::hunt::{MarketPrice, PerUnit};
     use crate::quantity::{Unit, UnitPrice};
 
     fn findings(offers: Vec<Offer>) -> Findings {
@@ -509,10 +534,41 @@ mod tests {
             }),
             ..deal(0)
         };
+        let lowest = Lowest {
+            price: MarketPrice::PerUnit(per_kilogram(250)),
+            ..lowest(0)
+        };
+        let text = deal_entry(&powder, Some(lowest));
+
         assert!(
-            deal_entry(&powder)
-                .contains("<b>2\u{a0}070\u{a0}₽</b> · 230\u{a0}₽/кг — на 28% ниже рынка (320\u{a0}₽/кг, по 6 похожим)")
+            text.contains("<b>2\u{a0}070\u{a0}₽</b> · 230\u{a0}₽/кг — на 28% ниже рынка (320\u{a0}₽/кг, по 6 похожим)")
         );
+        assert!(
+            text.contains("📉 Самая низкая цена с 01.10: раньше не опускалась ниже 250\u{a0}₽/кг"),
+            "килограммы сравниваются с килограммами, а не с ценой пачки: {text}"
+        );
+    }
+
+    fn lowest(rubles: u64) -> Lowest {
+        Lowest {
+            price: MarketPrice::Whole(rubles),
+            at: Local.with_ymd_and_hms(2026, 10, 12, 9, 0, 0).unwrap(),
+            since: Local.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn deal_is_compared_with_the_lowest_price_of_past_checks() {
+        let line = |lowest| deal_entry(&deal(6_600), lowest);
+
+        assert!(
+            line(Some(lowest(7_000)))
+                .contains("\n📉 Самая низкая цена с 01.10: раньше не опускалась ниже 7\u{a0}000\u{a0}₽\n")
+        );
+        assert!(line(Some(lowest(6_600))).contains("📉 Самая низкая цена с 01.10"));
+        assert!(line(Some(lowest(5_900))).contains("\nС 01.10 бывало и дешевле: 5\u{a0}900\u{a0}₽ (12.10)\n"));
+        let first_check = line(None);
+        assert!(!first_check.contains("📉") && !first_check.contains("бывало"));
     }
 
     fn drill_watch() -> Watch {
@@ -535,7 +591,8 @@ mod tests {
         assert_eq!(
             alert(&Alert::Started {
                 watch: &watch,
-                deals: &[]
+                deals: &[],
+                lowest: None,
             }),
             "🔎 Слежка «Шуруповёрт» запущена (Авито, перепродажа: выгода от 2\u{a0}000\u{a0}₽, до 5 км от дома). \
              Сейчас подходящих нет — напишу, как только появятся."
@@ -552,6 +609,7 @@ mod tests {
         let text = alert(&Alert::NewDeals {
             watch: &watch,
             deals: &deals,
+            lowest: None,
         });
 
         assert!(text.starts_with("🔔 «Шуруповёрт»: новые выгодные предложения — 1"));
@@ -585,6 +643,7 @@ mod tests {
         let text = alert(&Alert::NewDeals {
             watch: &watch,
             deals: &deals,
+            lowest: Some(lowest(4_000)),
         });
         assert!(text.chars().count() <= MESSAGE_LIMIT);
         assert!(text.contains("во вкладке «Находки» в программе"));

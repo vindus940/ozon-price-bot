@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
-use crate::hunt::market::{Market, PerUnit};
+use crate::hunt::market::{Market, MarketPrice, PerUnit};
 use crate::hunt::watch::Goal;
 use crate::offer::Offer;
 
@@ -60,9 +60,27 @@ pub struct Verdict {
     pub suspicious: bool,
 }
 
+impl Deal {
+    /// Цена в том виде, в каком её сравнивали с рынком: за предложение или, у расходников, за единицу.
+    pub fn compared_price(&self) -> MarketPrice {
+        self.per_unit.map_or(MarketPrice::Whole(self.offer.price), |per_unit| {
+            MarketPrice::PerUnit(per_unit.price)
+        })
+    }
+}
+
 /// Неизвестное расстояние радиус не проходит: «до 5 км» значит «точно не дальше 5 км».
 pub fn within_radius(radius_km: Option<u32>, offer: &Offer) -> bool {
     radius_km.is_none_or(|radius| offer.distance_km.is_some_and(|km| km <= f64::from(radius)))
+}
+
+/// На сколько процентов цена ниже рынка; дороже рынка — ноль.
+fn discount_percent(market: u64, price: u64) -> u64 {
+    market.saturating_sub(price) * 100 / market.max(1)
+}
+
+pub fn suspiciously_cheap(market: u64, price: u64) -> bool {
+    discount_percent(market, price) > SUSPICIOUS_DISCOUNT_PERCENT
 }
 
 /// Выгодно ли предложение для этой цели. `None` — не выгодно или дальше радиуса.
@@ -71,8 +89,8 @@ pub fn evaluate(goal: Goal, radius_km: Option<u32>, market: Market, offer: &Offe
         return None;
     }
 
-    let discount_percent = market.median.saturating_sub(offer.price) * 100 / market.median.max(1);
-    let suspicious = discount_percent > SUSPICIOUS_DISCOUNT_PERCENT;
+    let discount_percent = discount_percent(market.median, offer.price);
+    let suspicious = suspiciously_cheap(market.median, offer.price);
 
     match goal {
         Goal::BelowMarket { min_discount_percent } => {
