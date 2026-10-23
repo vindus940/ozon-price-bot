@@ -64,7 +64,11 @@ fn main() -> Result<()> {
     };
     let ozon = throttled(ozon, SourceKind::Ozon);
     let avito = throttled(
-        Arc::new(Avito::new(Arc::clone(&browser), settings.avito_region.clone())),
+        Arc::new(Avito::new(
+            Arc::clone(&browser),
+            settings.avito_region.clone(),
+            storage.clone(),
+        )),
         SourceKind::Avito,
     );
     let dns = throttled(Arc::new(Dns::new(browser)), SourceKind::Dns);

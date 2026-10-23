@@ -110,6 +110,10 @@ impl State {
     fn save_history(&mut self, storage: &Storage) {
         save(storage, &mut self.journal, history::FILE, &self.history);
     }
+
+    fn save_checks(&mut self, storage: &Storage) {
+        save(storage, &mut self.journal, schedule::FILE, self.schedule.runs());
+    }
 }
 
 /// Не сохранилось — пишем в журнал и работаем дальше: в памяти всё есть, файл перепишется при следующем изменении.
@@ -139,7 +143,7 @@ impl Hunter {
     ) -> Self {
         let state = State {
             book: storage.load(book::FILE),
-            schedule: Schedule::default(),
+            schedule: Schedule::with_runs(storage.load(schedule::FILE)),
             feed: storage.load(feed::FILE),
             notified: storage.load(memory::FILE),
             history: storage.load(history::FILE),
@@ -223,6 +227,7 @@ impl Hunter {
         state.journal.write(format!("Слежка «{name}» сохранена"));
         state.save_watches(&self.storage);
         state.save_notified(&self.storage);
+        state.save_checks(&self.storage);
         if other_market {
             state.history.forget(watch_id);
             state.save_history(&self.storage);
@@ -244,6 +249,7 @@ impl Hunter {
         state.save_watches(&self.storage);
         state.save_notified(&self.storage);
         state.save_history(&self.storage);
+        state.save_checks(&self.storage);
     }
 
     pub fn set_enabled(&self, watch_id: u64, enabled: bool) {
@@ -285,6 +291,7 @@ impl Hunter {
         let mut state = self.state();
         state.home = home;
         state.schedule.retry_failed();
+        state.save_checks(&self.storage);
         drop(state);
         self.wake.notify_one();
     }
@@ -484,6 +491,7 @@ impl Hunter {
         state.schedule.record(watch.id, now, outcome);
         state.save_deals(&self.storage);
         state.save_notified(&self.storage);
+        state.save_checks(&self.storage);
         Some(Checked {
             first_run,
             news,
@@ -503,6 +511,7 @@ impl Hunter {
             state
                 .schedule
                 .record(watch.id, Local::now(), Outcome::Failed(reason.clone()));
+            state.save_checks(&self.storage);
             state.notified.failure_reported(watch.id)
         };
         if !already_reported && self.send(watch, Alert::Failed { watch, reason: &reason }).await {
@@ -852,6 +861,36 @@ mod tests {
                 .market_history(id)
                 .is_empty(),
             "удалённая слежка уносит историю с собой"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_waits_for_the_watch_interval_instead_of_checking_again() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("restart");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.check(id).await;
+
+        let restarted = hunter_with(&source, &notifier, &storage);
+
+        assert_eq!(
+            restarted.next_to_check(),
+            None,
+            "слежку только что проверили — сайт не трогаем"
+        );
+        assert!(matches!(
+            restarted.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Checked { scanned: 8, .. })
+        ));
+
+        restarted.save_watch(Watch { id, ..iphone_watch() }).unwrap();
+        let after_edit = hunter_with(&source, &notifier, &storage);
+        assert_eq!(
+            after_edit.next_to_check(),
+            Some(id),
+            "правка начинает слежку заново и после перезапуска"
         );
     }
 

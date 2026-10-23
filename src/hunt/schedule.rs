@@ -1,10 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 
 use chrono::{DateTime, Duration, Local};
+use serde::{Deserialize, Serialize};
 
 use crate::hunt::market::MarketPrice;
 use crate::hunt::watch::Watch;
 use crate::marketplace::SourceKind;
+
+pub const FILE: &str = "checks.json";
 
 /// Пока на площадке открыта проверка «я не робот», повторные попытки только злят её: после первой такой проверки
 /// слежки площадки ждут 15 минут, после второй подряд — час, после третьей — пока вы сами не нажмёте «Проверить сейчас».
@@ -22,13 +25,13 @@ struct Captchas {
     pause: Pause,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunStatus {
     pub at: DateTime<Local>,
     pub outcome: Outcome,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Outcome {
     Checked {
         scanned: usize,
@@ -42,8 +45,8 @@ pub enum Outcome {
 }
 
 /// Когда какую слежку проверять: итоги последних проверок, очередь «Проверить сейчас», слежка, которая
-/// проверяется в эту минуту, и паузы площадок после проверок «я не робот». Всё это живёт только в памяти:
-/// после перезапуска все слежки проверяются сразу.
+/// проверяется в эту минуту, и паузы площадок после проверок «я не робот». Итоги сохраняются в файл: иначе каждый
+/// перезапуск программы сразу заново заходил бы на все площадки, и Авито ограничивал адрес. Остальное живёт в памяти.
 #[derive(Debug, Default)]
 pub struct Schedule {
     runs: HashMap<u64, RunStatus>,
@@ -53,6 +56,19 @@ pub struct Schedule {
 }
 
 impl Schedule {
+    /// Расписание после перезапуска: слежки ждут своего срока от прошлых проверок.
+    pub fn with_runs(runs: HashMap<u64, RunStatus>) -> Self {
+        Self {
+            runs,
+            ..Self::default()
+        }
+    }
+
+    /// Итоги последних проверок — то, что сохраняется в файл.
+    pub fn runs(&self) -> &HashMap<u64, RunStatus> {
+        &self.runs
+    }
+
     pub fn status(&self, watch_id: u64) -> Option<RunStatus> {
         self.runs.get(&watch_id).cloned()
     }

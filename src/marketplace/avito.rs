@@ -12,9 +12,11 @@ use crate::browser::{Browser, Tab};
 use crate::marketplace::page::{self, PageState, ScriptPage};
 use crate::marketplace::{Area, OfferSource, SourceError};
 use crate::offer::Offer;
+use crate::storage::Storage;
 
 const HOME: &str = "https://www.avito.ru/";
 const READ_SCRIPT: &str = include_str!("avito/read.js");
+const CATEGORIES_FILE: &str = "avito-categories.json";
 /// Сортировка «по дате»: свежие объявления первыми — ради них и проверяем.
 const NEWEST_FIRST: &str = "104";
 /// Так Авито отвечает, например, на опечатку в городе: avito.ru/moskwa.
@@ -25,8 +27,43 @@ const NOT_FOUND: &str = "Авито ответил «страница не на�
 pub struct Avito {
     browser: Arc<Browser>,
     region: String,
-    /// Одна вкладка — один поиск за раз. Под тем же замком — запомненные категории запросов.
-    category_paths: Mutex<HashMap<String, String>>,
+    /// Одна вкладка — один поиск за раз. Под тем же замком — запомненные разделы запросов.
+    categories: Mutex<Categories>,
+}
+
+/// Разделы, в которые Авито переводит запросы, — по городу и словам. Хранятся в файле: иначе каждый запуск
+/// программы стоил бы Авито лишнего перехода на каждую слежку, а частые переходы Авито наказывает ограничением адреса.
+struct Categories {
+    paths: HashMap<String, String>,
+    storage: Storage,
+}
+
+impl Categories {
+    fn load(storage: Storage) -> Self {
+        Self {
+            paths: storage.load(CATEGORIES_FILE),
+            storage,
+        }
+    }
+
+    fn get(&self, region: &str, query: &str) -> Option<String> {
+        self.paths.get(&category_key(region, query)).cloned()
+    }
+
+    fn remember(&mut self, region: &str, query: &str, path: &str) {
+        let key = category_key(region, query);
+        if self.paths.get(&key).is_some_and(|known| known == path) {
+            return;
+        }
+        self.paths.insert(key, path.to_string());
+        if let Err(error) = self.storage.save(CATEGORIES_FILE, &self.paths) {
+            log::warn!("Авито: не удалось запомнить раздел — {error:#}");
+        }
+    }
+}
+
+fn category_key(region: &str, query: &str) -> String {
+    format!("{region} {query}")
 }
 
 #[derive(Deserialize)]
@@ -51,31 +88,26 @@ struct Card {
 }
 
 impl Avito {
-    /// `region` — город, как в адресе сайта: moskva, sankt-peterburg, ekaterinburg.
-    pub fn new(browser: Arc<Browser>, region: impl Into<String>) -> Self {
+    /// `region` — город, как в адресе сайта: moskva, sankt-peterburg, ekaterinburg. В `storage` — запомненные разделы.
+    pub fn new(browser: Arc<Browser>, region: impl Into<String>, storage: Storage) -> Self {
         Self {
             browser,
             region: region.into(),
-            category_paths: Mutex::new(HashMap::new()),
+            categories: Mutex::new(Categories::load(storage)),
         }
     }
 
     /// Поиск по словам Авито сам переводит в категорию («шуруповерт» → «Дрели и шуруповёрты»), и радиус
     /// работает только в адресе категории. Категория запоминается, чтобы не открывать лишнюю страницу.
-    async fn category_path(
-        &self,
-        tab: &Tab,
-        paths: &mut HashMap<String, String>,
-        query: &str,
-    ) -> Result<String, SourceError> {
-        if let Some(path) = paths.get(query) {
-            return Ok(path.clone());
+    async fn category_path(&self, tab: &Tab, categories: &mut Categories, query: &str) -> Result<String, SourceError> {
+        if let Some(path) = categories.get(&self.region, query) {
+            return Ok(path);
         }
         let url = Url::parse_with_params(&format!("{HOME}{}", self.region), &[("q", query)])
             .context("не удалось составить адрес поиска")?;
         open(tab, url.as_str()).await?;
         let path: String = tab.evaluate("location.pathname").await?;
-        paths.insert(query.to_string(), path.clone());
+        categories.remember(&self.region, query, &path);
         Ok(path)
     }
 }
@@ -87,16 +119,17 @@ impl OfferSource for Avito {
     }
 
     async fn search(&self, query: &str, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
-        let mut paths = self.category_paths.lock().await;
+        let mut categories = self.categories.lock().await;
         let tab = self.browser.tab(HOME).await?;
-        let path = self.category_path(&tab, &mut paths, query).await?;
+        let path = self.category_path(&tab, &mut categories, query).await?;
         let mut page = open(&tab, search_url(&path, query, area)?.as_str()).await?;
+        // Авито мог перевести запрос в другой раздел — запоминаем, где выдача на самом деле.
+        categories.remember(&self.region, query, &page.path);
 
         if let Some(area) = area
             && !page.has_radius(area)
         {
             // Авито перевёл поиск в другой раздел и по дороге выбросил радиус — повторяем уже в этом разделе.
-            paths.insert(query.to_string(), page.path.clone());
             page = open(&tab, search_url(&page.path, query, Some(area))?.as_str()).await?;
             if !page.has_radius(area) {
                 return Err(anyhow!(
@@ -110,7 +143,7 @@ impl OfferSource for Avito {
     }
 
     async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
-        let _one_search_per_tab = self.category_paths.lock().await;
+        let _one_search_per_tab = self.categories.lock().await;
         let tab = self.browser.tab(HOME).await?;
         let page = open(&tab, link_url(link, area).as_str()).await?;
         if let Some(area) = area
@@ -268,6 +301,27 @@ mod tests {
     use super::*;
     use crate::geo::GeoPoint;
 
+    #[test]
+    fn categories_survive_restart_and_belong_to_their_city() {
+        let dir = std::env::temp_dir().join(format!("ozon-price-bot-avito-categories-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut categories = Categories::load(Storage::new(dir.clone()));
+
+        categories.remember("moskva", "Logitech G435", "/moskva/bytovaya_elektronika");
+        let restarted = Categories::load(Storage::new(dir.clone()));
+
+        assert_eq!(
+            restarted.get("moskva", "Logitech G435").as_deref(),
+            Some("/moskva/bytovaya_elektronika")
+        );
+        assert_eq!(
+            restarted.get("sankt-peterburg", "Logitech G435"),
+            None,
+            "в другом городе раздел узнаётся заново"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn card(price: Option<&str>, place: Option<&str>) -> Card {
         Card {
             title: "Шуруповерт makita 8280dwae".into(),
@@ -412,7 +466,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "открывает браузер и ходит на живой Авито: cargo test -- --ignored --test-threads=1"]
     async fn finds_listings_near_point_on_live_site() {
-        let avito = Avito::new(crate::browser::test_browser(), "moskva");
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-avito-data");
+        let avito = Avito::new(crate::browser::test_browser(), "moskva", Storage::new(data));
         let near = Area {
             center: GeoPoint {
                 lat: 55.751_244,
