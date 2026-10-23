@@ -64,10 +64,14 @@ pub enum Alert<'a> {
         deals: &'a [Deal],
         lowest: Option<Lowest>,
     },
-    /// Слежка перестала работать. Приходит один раз, а не при каждой неудачной проверке.
+    /// Слежка перестала работать. Приходит один раз, а не при каждой неудачной проверке, — и после перезапуска тоже.
     Failed {
         watch: &'a Watch,
         reason: &'a str,
+    },
+    /// Слежка, о сбое которой сообщали, снова проверяет площадку.
+    Recovered {
+        watch: &'a Watch,
     },
     Test,
 }
@@ -392,8 +396,8 @@ impl Hunter {
             Ok(offers) => {
                 self.state().schedule.source_answered(watch.source);
                 let assessment = assess(&watch, offers, Local::now());
-                if let Some((first_run, news, lowest)) = self.record(&watch, &assessment) {
-                    self.alert(&watch, first_run, &news, lowest).await;
+                if let Some(checked) = self.record(&watch, &assessment) {
+                    self.alert(&watch, checked).await;
                 }
             }
             Err(CheckError::Source(SourceError::Captcha)) => {
@@ -442,9 +446,9 @@ impl Hunter {
         found.map_err(CheckError::Source)
     }
 
-    /// Сверяет находки с памятью и запоминает их и рынок. Вместе с новыми находками отдаёт самую низкую цену
-    /// прошлых проверок — до этой. `None` — слежку успели изменить или удалить, пока шла проверка.
-    fn record(&self, watch: &Watch, assessment: &Assessment) -> Option<(bool, Vec<Deal>, Option<Lowest>)> {
+    /// Сверяет находки с памятью и запоминает их и рынок. `None` — слежку успели изменить или удалить,
+    /// пока шла проверка.
+    fn record(&self, watch: &Watch, assessment: &Assessment) -> Option<Checked> {
         let mut state = self.state();
         if !state.book.still_has(watch) {
             return None;
@@ -453,6 +457,7 @@ impl Hunter {
         let now = Local::now();
         let first_run = state.notified.is_first_run(watch.id);
         let news = state.notified.take_news(watch.id, &assessment.suitable);
+        let recovered = state.notified.failure_reported(watch.id);
         let lowest_before = assessment
             .market
             .and_then(|market| state.history.lowest(watch.id, now, market.unit()));
@@ -479,36 +484,54 @@ impl Hunter {
         state.schedule.record(watch.id, now, outcome);
         state.save_deals(&self.storage);
         state.save_notified(&self.storage);
-        Some((first_run, news, lowest_before))
+        Some(Checked {
+            first_run,
+            news,
+            lowest: lowest_before,
+            recovered,
+        })
     }
 
-    /// Запоминает неудачу и сообщает о ней, только если до этого слежка работала.
+    /// Запоминает неудачу и сообщает о ней, только если о сбое этой слежки ещё не сообщали. Сообщение не ушло —
+    /// попробует снова при следующей неудачной проверке.
     async fn fail(&self, watch: &Watch, reason: String) {
-        let newly_failed = {
+        let already_reported = {
             let mut state = self.state();
             state
                 .journal
                 .write(format!("«{}»: проверка не удалась — {reason}", watch.name));
             state
                 .schedule
-                .record(watch.id, Local::now(), Outcome::Failed(reason.clone()))
+                .record(watch.id, Local::now(), Outcome::Failed(reason.clone()));
+            state.notified.failure_reported(watch.id)
         };
-        if newly_failed && let Some(notifier) = &self.notifier {
-            let alert = Alert::Failed { watch, reason: &reason };
-            if let Err(error) = notifier.notify(alert).await {
-                self.state()
-                    .journal
-                    .write(format!("Не удалось отправить уведомление: {error:#}"));
-            }
+        if !already_reported && self.send(watch, Alert::Failed { watch, reason: &reason }).await {
+            let mut state = self.state();
+            state.notified.report_failure(watch.id);
+            state.save_notified(&self.storage);
         }
     }
 
-    async fn alert(&self, watch: &Watch, first_run: bool, news: &[Deal], lowest: Option<Lowest>) {
-        let Some(notifier) = &self.notifier else { return };
+    /// «Запущена» и так говорит, что слежка работает, поэтому «снова работает» — только перед обычными новостями.
+    async fn alert(&self, watch: &Watch, checked: Checked) {
+        if self.notifier.is_none() {
+            return;
+        }
+        let Checked {
+            first_run,
+            news,
+            lowest,
+            recovered,
+        } = checked;
+        if recovered && (first_run || self.send(watch, Alert::Recovered { watch }).await) {
+            let mut state = self.state();
+            state.notified.report_recovery(watch.id);
+            state.save_notified(&self.storage);
+        }
         let alert = if first_run {
             Alert::Started {
                 watch,
-                deals: news,
+                deals: &news,
                 lowest,
             }
         } else if news.is_empty() {
@@ -516,25 +539,49 @@ impl Hunter {
         } else {
             Alert::NewDeals {
                 watch,
-                deals: news,
+                deals: &news,
                 lowest,
             }
         };
-        if let Err(error) = notifier.notify(alert).await {
+        if !self.send(watch, alert).await {
             let mut state = self.state();
-            for deal in news {
+            for deal in &news {
                 state.notified.forget_offer(watch.id, &deal.offer.url);
             }
             state.save_notified(&self.storage);
-            state.journal.write(format!(
-                "Не удалось отправить уведомление, повторю при следующей проверке: {error:#}"
-            ));
+        }
+    }
+
+    /// `false` — уведомление не ушло или Telegram не настроен.
+    async fn send(&self, watch: &Watch, alert: Alert<'_>) -> bool {
+        let Some(notifier) = &self.notifier else {
+            return false;
+        };
+        match notifier.notify(alert).await {
+            Ok(()) => true,
+            Err(error) => {
+                self.state().journal.write(format!(
+                    "«{}»: не удалось отправить уведомление, повторю при следующей проверке: {error:#}",
+                    watch.name
+                ));
+                false
+            }
         }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Что сообщить после удачной проверки.
+struct Checked {
+    first_run: bool,
+    news: Vec<Deal>,
+    /// Самая низкая цена прошлых проверок — до этой.
+    lowest: Option<Lowest>,
+    /// О сбое слежки сообщали, а теперь она снова работает.
+    recovered: bool,
 }
 
 fn summary(watch: &Watch, assessment: &Assessment, news: usize) -> String {
@@ -665,6 +712,7 @@ mod tests {
                         .join(",")
                 ),
                 Alert::Failed { .. } => "failed".into(),
+                Alert::Recovered { .. } => "recovered".into(),
                 Alert::Test => "test".into(),
             };
             self.alerts.lock().unwrap().push(text);
@@ -843,11 +891,54 @@ mod tests {
         source.captcha.store(true, Ordering::SeqCst);
         hunter.check(id).await;
 
-        assert_eq!(alerts(&notifier), ["failed", "started:0", "failed"]);
+        assert_eq!(
+            alerts(&notifier),
+            ["failed", "started:0", "failed"],
+            "«запущена» и так говорит, что слежка заработала"
+        );
         assert!(matches!(
             hunter.run_status(id).map(|run| run.outcome),
             Some(Outcome::Failed(reason)) if reason.contains("пройдите проверку в окне браузера программы")
         ));
+    }
+
+    #[tokio::test]
+    async fn failure_is_not_repeated_after_restart_and_recovery_is_announced_once() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("failure-restart");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.check(id).await;
+        source.captcha.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+
+        let restarted = hunter_with(&source, &notifier, &storage);
+        restarted.check(id).await;
+        source.captcha.store(false, Ordering::SeqCst);
+        restarted.check(id).await;
+        restarted.check(id).await;
+
+        assert_eq!(alerts(&notifier), ["started:0", "failed", "recovered"]);
+    }
+
+    #[tokio::test]
+    async fn undelivered_failure_alert_is_sent_at_the_next_failure() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("failure-offline");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+        hunter.check(id).await;
+
+        source.captcha.store(true, Ordering::SeqCst);
+        notifier.offline.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+        notifier.offline.store(false, Ordering::SeqCst);
+        hunter.check(id).await;
+        hunter.check(id).await;
+
+        assert_eq!(alerts(&notifier), ["started:0", "failed"]);
     }
 
     #[tokio::test]

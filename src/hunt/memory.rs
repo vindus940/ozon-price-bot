@@ -18,6 +18,10 @@ pub struct Notified {
     /// Правка слежки их не сбрасывает — подделка остаётся подделкой и при других условиях.
     #[serde(default)]
     dismissed: HashMap<u64, HashSet<String>>,
+    /// Слежки, о сбое которых уже сообщили. В файле, а не в памяти программы: иначе каждый перезапуск
+    /// присылал бы то же «не смогла проверить» снова.
+    #[serde(default)]
+    failing: HashSet<u64>,
 }
 
 impl Notified {
@@ -62,8 +66,22 @@ impl Notified {
         self.by_watch.entry(watch_id).or_default();
     }
 
+    /// Правка начинает слежку заново: и её сбой, если повторится, — уже новость.
     pub fn forget(&mut self, watch_id: u64) {
         self.by_watch.remove(&watch_id);
+        self.failing.remove(&watch_id);
+    }
+
+    pub fn failure_reported(&self, watch_id: u64) -> bool {
+        self.failing.contains(&watch_id)
+    }
+
+    pub fn report_failure(&mut self, watch_id: u64) {
+        self.failing.insert(watch_id);
+    }
+
+    pub fn report_recovery(&mut self, watch_id: u64) {
+        self.failing.remove(&watch_id);
     }
 
     /// Слежку удалили: забыть о ней всё, и отметки «мимо» тоже.
@@ -142,5 +160,20 @@ mod tests {
     fn memory_saved_before_dismissals_is_read() {
         let old: Notified = serde_json::from_str(r#"{"by_watch":{"1":{"https://example.com/a":100}}}"#).unwrap();
         assert!(!old.is_news(1, "https://example.com/a", 100));
+        assert!(!old.failure_reported(1));
+    }
+
+    #[test]
+    fn reported_failure_is_saved_and_cleared_by_recovery_or_edit() {
+        let mut notified = Notified::default();
+        notified.report_failure(1);
+        notified.report_failure(2);
+
+        let saved: Notified = serde_json::from_str(&serde_json::to_string(&notified).unwrap()).unwrap();
+        assert!(saved.failure_reported(1), "отметка переживает перезапуск");
+
+        notified.report_recovery(1);
+        notified.forget(2);
+        assert!(!notified.failure_reported(1) && !notified.failure_reported(2));
     }
 }

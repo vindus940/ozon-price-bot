@@ -91,12 +91,8 @@ impl Schedule {
         self.checking = None;
     }
 
-    /// Запоминает итог проверки. `true` — слежка только что сломалась: до этого она работала или ещё
-    /// не проверялась. О таком сбое стоит сообщить, о повторных — нет.
-    pub fn record(&mut self, watch_id: u64, at: DateTime<Local>, outcome: Outcome) -> bool {
-        let newly_failed = matches!(outcome, Outcome::Failed(_)) && !self.is_failing(watch_id);
+    pub fn record(&mut self, watch_id: u64, at: DateTime<Local>, outcome: Outcome) {
         self.runs.insert(watch_id, RunStatus { at, outcome });
-        newly_failed
     }
 
     /// Площадка показала проверку «я не робот» — на сколько встают её слежки.
@@ -131,12 +127,6 @@ impl Schedule {
     /// Упавшие слежки проверяются сразу, а не через свой интервал: например, когда указали дом, которого им не хватало.
     pub fn retry_failed(&mut self) {
         self.runs.retain(|_, run| !matches!(run.outcome, Outcome::Failed(_)));
-    }
-
-    fn is_failing(&self, watch_id: u64) -> bool {
-        self.runs
-            .get(&watch_id)
-            .is_some_and(|run| matches!(run.outcome, Outcome::Failed(_)))
     }
 }
 
@@ -182,18 +172,6 @@ mod tests {
         schedule.record(2, now, checked());
         assert_eq!(schedule.next(&watches, now), None);
         assert_eq!(schedule.next(&watches, now + Duration::minutes(15)), Some(1));
-    }
-
-    #[test]
-    fn failure_is_news_only_after_success_or_first_time() {
-        let now = Local::now();
-        let mut schedule = Schedule::default();
-        let failed = || Outcome::Failed("капча".into());
-
-        assert!(schedule.record(1, now, failed()));
-        assert!(!schedule.record(1, now, failed()));
-        assert!(!schedule.record(1, now, checked()));
-        assert!(schedule.record(1, now, failed()));
     }
 
     #[test]
