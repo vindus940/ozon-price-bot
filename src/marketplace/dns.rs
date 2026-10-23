@@ -1,4 +1,5 @@
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::browser::Browser;
+use crate::browser::{Browser, Tab};
 use crate::marketplace::page::{self, PageState, ScriptPage};
 use crate::marketplace::{Area, OfferSource, SourceError};
 use crate::offer::Offer;
@@ -15,6 +16,10 @@ use crate::offer::Offer;
 const HOME: &str = "https://www.dns-shop.ru/";
 const READ_SCRIPT: &str = include_str!("dns/read.js");
 const NOT_FOUND: &str = "ДНС открыл не выдачу, а страницу бренда — уточните запрос: не «makita», а «шуруповерт makita»";
+/// Страница ДНС — 24 товара, для рынка мало. Три страницы — 72, а переходов на сайт за проверку всего три.
+const PAGES: u32 = 3;
+/// Между страницами — пауза, как у человека, листающего выдачу: защита ДНС строже, чем у Ozon.
+const PAUSE_BETWEEN_PAGES: Duration = Duration::from_secs(3);
 
 /// Магазин ДНС. Поиск он сам переводит в каталог нужной категории («шуруповерт makita» → «Шуруповерты»),
 /// а цены дорисовывает после загрузки страницы — поэтому, как и Авито, вкладка открывает поиск и читает готовые карточки.
@@ -28,6 +33,7 @@ pub struct Dns {
 struct Page {
     stale: bool,
     state: PageState,
+    url: String,
     city: Option<String>,
     cards: Vec<Card>,
 }
@@ -66,19 +72,71 @@ impl OfferSource for Dns {
         let tab = self.browser.tab(HOME).await?;
         let url = Url::parse_with_params(&format!("{HOME}search/"), &[("q", query)])
             .context("не удалось составить адрес поиска")?;
-        let page: Page = page::open(&tab, url.as_str(), READ_SCRIPT, NOT_FOUND).await?;
-        if let Some(city) = &page.city {
-            log::info!("ДНС: «{query}», город на сайте — {city}");
-        }
-        page.into_offers()
+        read_pages(&tab, url.as_str()).await
     }
 
     /// Фильтры ДНС хранит в самом адресе каталога (бренд — частью пути подборки), поэтому ссылка открывается как есть.
     async fn search_link(&self, link: &Url, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
         let _exclusive = self.tab_in_use.lock().await;
         let tab = self.browser.tab(HOME).await?;
-        let page: Page = page::open(&tab, link.as_str(), READ_SCRIPT, NOT_FOUND).await?;
-        page.into_offers()
+        read_pages(&tab, link.as_str()).await
+    }
+}
+
+/// Первая страница — по адресу поиска или ссылки, следующие — тот же каталог с номером страницы.
+async fn read_pages(tab: &Tab, url: &str) -> Result<Vec<Offer>, SourceError> {
+    let mut page: Page = page::open(tab, url, READ_SCRIPT, NOT_FOUND).await?;
+    if let Some(city) = &page.city {
+        log::info!("ДНС: {}, город на сайте — {city}", page.url);
+    }
+    let mut catalog = Catalog::default();
+    for number in 2..=PAGES {
+        let address = page_url(&page.url, number)?;
+        if !catalog.add(page)? {
+            return Ok(catalog.offers);
+        }
+        tokio::time::sleep(PAUSE_BETWEEN_PAGES).await;
+        page = page::open(tab, address.as_str(), READ_SCRIPT, NOT_FOUND).await?;
+    }
+    catalog.add(page)?;
+    Ok(catalog.offers)
+}
+
+/// Адрес страницы каталога с номером `number`: параметр `p`, остальное — как было.
+fn page_url(catalog: &str, number: u32) -> anyhow::Result<Url> {
+    let mut url = Url::parse(catalog).context("ДНС открыл непонятный адрес каталога")?;
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "p")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(&kept)
+        .append_pair("p", &number.to_string());
+    Ok(url)
+}
+
+/// Товары со страниц выдачи. Дальше листать стоит, пока страница полная и приносит новое: неполная — последняя,
+/// а без новых товаров ДНС, видимо, показал за последней страницей уже виденное.
+#[derive(Default)]
+struct Catalog {
+    offers: Vec<Offer>,
+    page_size: usize,
+}
+
+impl Catalog {
+    fn add(&mut self, page: Page) -> Result<bool, SourceError> {
+        let cards = page.cards.len();
+        let before = self.offers.len();
+        for offer in page.into_offers()? {
+            if !self.offers.iter().any(|seen| seen.url == offer.url) {
+                self.offers.push(offer);
+            }
+        }
+        let full = cards > 0 && cards >= self.page_size;
+        self.page_size = self.page_size.max(cards);
+        Ok(full && self.offers.len() > before)
     }
 }
 
@@ -190,9 +248,51 @@ mod tests {
         Page {
             stale: false,
             state: PageState::Listings,
+            url: "https://www.dns-shop.ru/catalog/17a9c6ec16404e77/surupoverty-dreli-surupoverty/?q=makita".into(),
             city: Some("Москва".into()),
             cards,
         }
+    }
+
+    fn cards(numbers: std::ops::Range<u32>) -> Vec<Card> {
+        numbers
+            .map(|number| Card {
+                url: format!("https://www.dns-shop.ru/product/{number}/"),
+                ..card(Some("6 399 ₽"), true)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn next_page_is_the_same_catalog_with_its_number() {
+        let catalog = "https://www.dns-shop.ru/catalog/17a9c6ec16404e77/surupoverty-dreli-surupoverty/\
+                       ?q=makita&stock=now-today-tomorrow-later-out_of_stock&order=popular";
+        assert_eq!(page_url(catalog, 2).unwrap().as_str(), format!("{catalog}&p=2"));
+        assert_eq!(
+            page_url(&format!("{catalog}&p=2"), 3).unwrap().as_str(),
+            format!("{catalog}&p=3"),
+            "номер из ссылки заменяется, а не дублируется"
+        );
+    }
+
+    #[test]
+    fn pages_are_read_while_full_and_bringing_new_offers() {
+        let mut catalog = Catalog::default();
+        assert!(catalog.add(page(cards(0..24))).unwrap());
+        assert!(catalog.add(page(cards(24..48))).unwrap());
+        assert!(
+            !catalog.add(page(cards(48..55))).unwrap(),
+            "неполная страница — последняя"
+        );
+        assert_eq!(catalog.offers.len(), 55);
+
+        let mut repeated = Catalog::default();
+        repeated.add(page(cards(0..24))).unwrap();
+        assert!(
+            !repeated.add(page(cards(0..24))).unwrap(),
+            "за последней страницей — уже виденное"
+        );
+        assert_eq!(repeated.offers.len(), 24);
     }
 
     #[test]
@@ -259,7 +359,11 @@ mod live {
 
         let offers = dns.search("шуруповерт makita", None).await.unwrap();
 
-        assert!(offers.len() >= 10, "собрано всего {}", offers.len());
+        assert!(
+            offers.len() > 24,
+            "собрано всего {} — читается только первая страница из 24 товаров",
+            offers.len()
+        );
         assert!(offers.iter().all(|offer| !offer.name.is_empty()
             && offer.price > 0
             && offer.url.starts_with("https://www.dns-shop.ru/product/")));
@@ -288,10 +392,24 @@ mod live {
 
         let offers = dns.search_link(&link, None).await.unwrap();
 
-        assert!(offers.len() >= 10, "собрано всего {}", offers.len());
         assert!(
-            offers.iter().all(|offer| offer.name.to_lowercase().contains("sony")),
-            "в подборке Sony оказались другие бренды"
+            offers.len() > 24,
+            "собрано всего {} — следующие страницы подборки не прочитались",
+            offers.len()
+        );
+        // Гарнитуры PlayStation выпускает Sony, и ДНС держит их в подборке, хотя в названии слова «Sony» нет.
+        let other_brands: Vec<&str> = offers
+            .iter()
+            .map(|offer| offer.name.as_str())
+            .filter(|name| {
+                !["sony", "playstation"]
+                    .iter()
+                    .any(|brand| name.to_lowercase().contains(brand))
+            })
+            .collect();
+        assert!(
+            other_brands.is_empty(),
+            "фильтр подборки потерялся на следующих страницах: {other_brands:?}"
         );
     }
 }

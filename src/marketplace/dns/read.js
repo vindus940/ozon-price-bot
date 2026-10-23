@@ -47,6 +47,8 @@
   return {
     stale: !!window.__huntStale,
     state,
+    // Куда ДНС перевёл поиск: следующие страницы — этот же адрес с номером страницы.
+    url: location.href,
     // Суффикс класса («city-select__text_90n») ДНС меняет при обновлениях — ищем по началу имени.
     city: textOf(document, '[class*="city-select__text"]'),
     cards,
