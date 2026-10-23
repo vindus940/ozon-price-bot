@@ -100,5 +100,9 @@
     };
   };
 
-  return { gridItems, nextPortionPath, toOffer };
+  // Страница проверки «я не робот» вместо выдачи. Слово antibot само по себе не признак: служебные параметры
+  // x-o3-antibot-score и x-o3-antibot-processed есть на любой странице Ozon, и запрос без товаров («1») выглядел капчей.
+  const isRobotCheck = html => /(?<!x-o3-)antibot|captcha|доступ ограничен|не робот/i.test(html);
+
+  return { gridItems, nextPortionPath, toOffer, isRobotCheck };
 })()

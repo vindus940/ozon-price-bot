@@ -183,6 +183,32 @@ mod tests {
         serde_json::from_str(&json).unwrap()
     }
 
+    fn is_robot_check(html: &str) -> bool {
+        let script = format!(
+            "const parse = {PARSE_SCRIPT}; parse.isRobotCheck({})",
+            serde_json::to_string(html).unwrap()
+        );
+        let mut engine = boa_engine::Context::default();
+        engine
+            .eval(boa_engine::Source::from_bytes(&script))
+            .unwrap_or_else(|error| panic!("parse.js упал: {error}"))
+            .to_boolean()
+    }
+
+    #[test]
+    fn service_antibot_params_of_every_page_are_not_a_robot_check() {
+        let empty_search = r#"<div id="state-searchBarDesktop-3414131"></div>
+            <script>{"o3Params":{"x-o3-antibot-score":"0","x-o3-antibot-processed":"1"}}</script>"#;
+        assert!(
+            !is_robot_check(empty_search),
+            "так выглядит любая страница Ozon, например поиск «1» без товаров"
+        );
+        assert!(is_robot_check("<title>Доступ ограничен</title>"));
+        assert!(is_robot_check(
+            r#"<div class="antibot-challenge">Подтвердите, что вы не робот</div>"#
+        ));
+    }
+
     /// Если упал после того, как Ozon поменял выдачу: поправьте parse.js, сохраните свежий образец
     /// (`saves_fresh_portion_sample`) и обновите здесь первую карточку.
     #[test]

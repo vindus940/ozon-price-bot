@@ -29,7 +29,7 @@ async (query, portions, parse, start) => {
     const widgets = [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('[id^="state-"]')]
       .map(element => [element.id.replace(/^state-/, ''), element.getAttribute('data-state')]);
     const items = parse.gridItems(widgets);
-    if (!items.length && /antibot|captcha|доступ ограничен|не робот/i.test(html)) captcha = true;
+    if (!items.length && parse.isRobotCheck(html)) captcha = true;
     return { items, next: parse.nextPortionPath(widgets) || null };
   };
 
