@@ -43,13 +43,19 @@ impl Browser {
         Ok(Self { settings, devtools })
     }
 
-    /// Вкладка, адрес которой начинается с `home`. Закрытый браузер запускается, отсутствующая вкладка открывается.
+    /// Вкладка, адрес которой начинается с `home`, — разбуженная. Закрытый браузер запускается, отсутствующая вкладка
+    /// открывается.
     pub async fn tab(&self, home: &str) -> Result<Tab> {
         self.ensure_running(home).await?;
-        match self.devtools.find_tab(home).await? {
-            Some(tab) => Ok(tab),
-            None => self.devtools.open_tab(home).await,
+        let tab = match self.devtools.find_tab(home).await? {
+            Some(tab) => tab,
+            None => self.devtools.open_tab(home).await?,
+        };
+        // Не разбудилась — всё равно пробуем: в незамороженной вкладке поиск пройдёт и так.
+        if let Err(error) = tab.wake().await {
+            log::warn!("{error:#}");
         }
+        Ok(tab)
     }
 
     async fn ensure_running(&self, start_url: &str) -> Result<()> {

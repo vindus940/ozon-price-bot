@@ -88,6 +88,18 @@ impl Tab {
         evaluation_result(reply)
     }
 
+    /// Скрытую вкладку Edge со временем замораживает: синхронный код в ней ещё выполняется, а таймеры и ответы `fetch`
+    /// не приходят, и поиск Ozon висел до тайм-аута. Команда возвращает вкладку к обычной работе, окно не показывая.
+    pub async fn wake(&self) -> Result<()> {
+        let reply = self
+            .command("Page.setWebLifecycleState", json!({ "state": "active" }))
+            .await?;
+        if let Some(error) = reply.get("error") {
+            bail!("браузер не разбудил вкладку: {error}");
+        }
+        Ok(())
+    }
+
     /// Открывает адрес во вкладке, как если бы его вставили в адресную строку.
     /// Возвращается, когда переход начался; дождаться загрузки — забота вызывающего.
     pub async fn navigate(&self, url: &str) -> Result<()> {
