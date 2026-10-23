@@ -69,6 +69,13 @@ impl Browser {
             .arg(format!("--remote-debugging-port={}", self.settings.debug_port))
             .arg(format!("--user-data-dir={}", self.settings.profile_dir.display()))
             .arg("--no-first-run")
+            // Окно браузера программы обычно свёрнуто или закрыто другими окнами, а в скрытых вкладках Edge растягивает
+            // таймеры — через пять минут до раза в минуту. На паузах между порциями Ozon поиск не укладывался в 120 секунд.
+            .args([
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+            ])
             .arg(start_url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
