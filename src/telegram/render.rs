@@ -296,6 +296,7 @@ fn goal_summary(watch: &Watch) -> String {
 
 /// Сколько находок влезает в одно сообщение — столько и показываем, остальные ждут в программе.
 fn deals_message(header: &str, deals: &[Deal], lowest: Option<Lowest>) -> String {
+    let header = format!("{header}{}", lowest_line(deals, lowest));
     let mut length = header.chars().count();
     let entries: Vec<String> = deals
         .iter()
@@ -349,22 +350,33 @@ fn deal_entry(deal: &Deal, lowest: Option<Lowest>) -> String {
 
 /// Скидка к рынку бывает и у цены, которая месяц назад была ниже: находку сравниваем ещё и с самой низкой
 /// ценой похожих за прошлые проверки — настоящей историей, а не зачёркнутой ценой магазина.
+/// Цена прошлого одна на всё сообщение, поэтому она в заголовке, а у находки — только отметка, что она ниже.
+fn lowest_line(deals: &[Deal], lowest: Option<Lowest>) -> String {
+    match lowest {
+        Some(lowest)
+            if deals
+                .iter()
+                .any(|deal| lowest.beaten_by(deal.compared_price()) == Some(false)) =>
+        {
+            format!(
+                "\nС {} самая низкая цена похожих — {} ({})",
+                lowest.since.format("%d.%m"),
+                lowest.price,
+                lowest.at.format("%d.%m")
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 fn history_line(deal: &Deal, lowest: Option<Lowest>) -> String {
-    let Some(lowest) = lowest else {
-        return String::new();
-    };
-    let since = lowest.since.format("%d.%m");
-    match lowest.beaten_by(deal.compared_price()) {
-        Some(true) => format!(
-            "\n📉 Самая низкая цена с {since}: раньше не опускалась ниже {}",
+    match lowest {
+        Some(lowest) if lowest.beaten_by(deal.compared_price()) == Some(true) => format!(
+            "\n📉 Самая низкая цена с {}: раньше не опускалась ниже {}",
+            lowest.since.format("%d.%m"),
             lowest.price
         ),
-        Some(false) => format!(
-            "\nС {since} бывало и дешевле: {} ({})",
-            lowest.price,
-            lowest.at.format("%d.%m")
-        ),
-        None => String::new(),
+        _ => String::new(),
     }
 }
 
@@ -571,9 +583,38 @@ mod tests {
                 .contains("\n📉 Самая низкая цена с 01.10: раньше не опускалась ниже 7\u{a0}000\u{a0}₽\n")
         );
         assert!(line(Some(lowest(6_600))).contains("📉 Самая низкая цена с 01.10"));
-        assert!(line(Some(lowest(5_900))).contains("\nС 01.10 бывало и дешевле: 5\u{a0}900\u{a0}₽ (12.10)\n"));
-        let first_check = line(None);
-        assert!(!first_check.contains("📉") && !first_check.contains("бывало"));
+        assert!(!line(Some(lowest(5_900))).contains("📉"));
+        assert!(!line(None).contains("📉"));
+    }
+
+    #[test]
+    fn lowest_price_of_the_past_is_said_once_per_message() {
+        let watch = drill_watch();
+        let deals = [deal(3_480), deal(3_900), deal(4_100)];
+        let text = alert(&Alert::Started {
+            watch: &watch,
+            deals: &deals,
+            lowest: Some(lowest(3_480)),
+        });
+
+        assert_eq!(text.matches("самая низкая цена похожих").count(), 1, "{text}");
+        assert!(text.contains(
+            "Дальше буду писать только о новых.\nС 01.10 самая низкая цена похожих — 3\u{a0}480\u{a0}₽ (12.10)\n\n"
+        ));
+        assert_eq!(text.matches("📉").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn no_lowest_price_in_the_header_when_every_deal_beats_it() {
+        let watch = drill_watch();
+        let text = alert(&Alert::NewDeals {
+            watch: &watch,
+            deals: &[deal(3_000), deal(3_200)],
+            lowest: Some(lowest(3_480)),
+        });
+
+        assert!(!text.contains("самая низкая цена похожих"), "{text}");
+        assert_eq!(text.matches("📉").count(), 2, "{text}");
     }
 
     fn drill_watch() -> Watch {
