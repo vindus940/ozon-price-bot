@@ -78,7 +78,12 @@ fn card(
                 hunter.source_pause(watch.source),
             );
             ui.colored_label(color, text);
-            super::history::show(ui, watch.id, &hunter.market_history(watch.id));
+            let series = if watch.target_price().is_some() {
+                super::history::Series::ProductPrice
+            } else {
+                super::history::Series::Market
+            };
+            super::history::show(ui, watch.id, series, &hunter.market_history(watch.id));
         } else {
             ui.colored_label(
                 WARN,

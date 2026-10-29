@@ -236,9 +236,14 @@ impl Watch {
 
     /// Тот же ли рынок у слежки после правки: история рынка говорит о том, что ищется и где. Цена, рейтинг,
     /// цель и частота рынок не меняют; стоп-слова только уточняют тот же товар — их и подсказка «мимо» добавляет
-    /// без перезапуска.
+    /// без перезапуска. У слежки за товаром история — его цена: другая цена (с картой или без) — другой ряд,
+    /// а сменить «рынок» на «товар» — совсем другая история.
     pub fn same_market(&self, other: &Watch) -> bool {
         let market = |watch: &Watch| {
+            let product_price = match watch.goal {
+                Goal::TargetPrice { without_card, .. } => Some(without_card),
+                Goal::BelowMarket { .. } | Goal::Resale { .. } => None,
+            };
             (
                 watch.source,
                 watch.category,
@@ -246,6 +251,7 @@ impl Watch {
                 watch.link.clone(),
                 watch.new_only,
                 watch.radius_km.is_some(),
+                product_price,
             )
         };
         market(self) == market(other)
@@ -566,6 +572,29 @@ mod tests {
             drill_for_resale().same_market(&farther),
             "а вокруг дома — всегда в самом большом радиусе"
         );
+    }
+
+    #[test]
+    fn product_price_history_survives_a_new_target_but_not_another_price_or_goal() {
+        let link = "https://www.ozon.ru/product/sony-wh-ch520-895366703/";
+        let headphones = product_watch(Some(link), 3_500);
+        let cheaper_target = product_watch(Some(link), 3_000);
+        let without_card = Watch {
+            goal: Goal::TargetPrice {
+                price: 3_500,
+                without_card: true,
+            },
+            ..headphones.clone()
+        };
+        let by_market = Watch {
+            goal: Goal::BelowMarket {
+                min_discount_percent: 20,
+            },
+            ..headphones.clone()
+        };
+        assert!(headphones.same_market(&cheaper_target));
+        assert!(!headphones.same_market(&without_card), "цена без карты — другой ряд");
+        assert!(!headphones.same_market(&by_market));
     }
 
     #[test]

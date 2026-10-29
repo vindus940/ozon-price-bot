@@ -12,25 +12,37 @@ const TIME_STEPS: [f64; 6] = [0.125, 0.25, 0.5, 1.0, 2.0, 7.0];
 /// Столько подписей дат помещается под графиком в карточке слежки.
 const TIME_MARKS: f64 = 6.0;
 
+/// Что за история у слежки: рынок похожих или цена одного товара по ссылке.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Series {
+    Market,
+    ProductPrice,
+}
+
 /// Строка «История рынка …» в карточке слежки; раскрывается в график рынка и самой низкой цены.
-pub(super) fn show(ui: &mut egui::Ui, watch_id: u64, points: &[MarketPoint]) {
-    let Some(title) = title(points) else {
+/// У слежки за товаром — «История цены …» и одна линия: рынок и самая низкая у неё — сама цена.
+pub(super) fn show(ui: &mut egui::Ui, watch_id: u64, series: Series, points: &[MarketPoint]) {
+    let Some(title) = title(series, points) else {
         return;
     };
     egui::CollapsingHeader::new(title)
         .id_salt(("market-history", watch_id))
-        .show(ui, |ui| chart(ui, watch_id, points));
+        .show(ui, |ui| chart(ui, watch_id, series, points));
 }
 
 /// «История рынка с 18.10: 4 352 ₽ → 4 100 ₽ (−6%), самая низкая 3 790 ₽ (12.10)». `None` — точка пока одна:
 /// рынок последней проверки и так виден в строке состояния.
-fn title(points: &[MarketPoint]) -> Option<String> {
+fn title(series: Series, points: &[MarketPoint]) -> Option<String> {
     let [first, .., last] = points else {
         return None;
     };
     let lowest = Lowest::among(points)?;
+    let what = match series {
+        Series::Market => "рынка",
+        Series::ProductPrice => "цены",
+    };
     Some(format!(
-        "История рынка с {}: {} → {} ({}), самая низкая {} ({})",
+        "История {what} с {}: {} → {} ({}), самая низкая {} ({})",
         first.at.format("%d.%m"),
         first.market,
         last.market,
@@ -51,7 +63,7 @@ fn change(from: u64, to: u64) -> String {
     }
 }
 
-fn chart(ui: &mut egui::Ui, watch_id: u64, points: &[MarketPoint]) {
+fn chart(ui: &mut egui::Ui, watch_id: u64, series: Series, points: &[MarketPoint]) {
     let Some(sample) = points.last().map(|point| point.market) else {
         return;
     };
@@ -86,9 +98,12 @@ fn chart(ui: &mut egui::Ui, watch_id: u64, points: &[MarketPoint]) {
             )),
             HoverPosition::Elsewhere { .. } => None,
         })
-        .show(ui, |plot| {
-            plot.line(Line::new("рынок", market).color(MARKET).width(2.0));
-            plot.line(Line::new("самая низкая", lowest).color(GOOD).width(2.0));
+        .show(ui, |plot| match series {
+            Series::Market => {
+                plot.line(Line::new("рынок", market).color(MARKET).width(2.0));
+                plot.line(Line::new("самая низкая", lowest).color(GOOD).width(2.0));
+            }
+            Series::ProductPrice => plot.line(Line::new("цена", market).color(MARKET).width(2.0)),
         });
 }
 
@@ -165,10 +180,18 @@ mod tests {
             point(20, 4_100, 3_850),
         ];
         assert_eq!(
-            title(&points).unwrap(),
+            title(Series::Market, &points).unwrap(),
             "История рынка с 18.10: 4\u{a0}352\u{a0}₽ → 4\u{a0}100\u{a0}₽ (−5%), самая низкая 3\u{a0}790\u{a0}₽ (19.10)"
         );
-        assert!(title(&points[..1]).is_none(), "по одной точке истории нет");
+        assert!(
+            title(Series::Market, &points[..1]).is_none(),
+            "по одной точке истории нет"
+        );
+        assert!(
+            title(Series::ProductPrice, &points)
+                .unwrap()
+                .starts_with("История цены с 18.10: ")
+        );
     }
 
     #[test]

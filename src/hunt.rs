@@ -563,7 +563,19 @@ impl Hunter {
             watch.name,
             format::rub(target)
         ));
-        state.schedule.record(watch.id, Local::now(), Outcome::Priced(price));
+        let now = Local::now();
+        // История цены товара — та же история, что у рынка: рынок и самая низкая здесь — сама цена.
+        if let Some(price) = price {
+            let point = MarketPoint {
+                at: now,
+                market: MarketPrice::Whole(price),
+                lowest: MarketPrice::Whole(price),
+                comparable: 1,
+            };
+            state.history.record(watch.id, point);
+            state.save_history(&self.storage);
+        }
+        state.schedule.record(watch.id, now, Outcome::Priced(price));
         state.save_notified(&self.storage);
         state.save_checks(&self.storage);
         Some(PriceChecked {
@@ -1096,6 +1108,15 @@ mod tests {
             "метки после ? в ссылке на товар не нужны"
         );
         assert!(hunter.deals().is_empty(), "цена товара — не находка с рынком");
+        let history = restarted.market_history(id);
+        assert_eq!(
+            history
+                .iter()
+                .map(|point| (point.market, point.lowest))
+                .collect::<Vec<_>>(),
+            [(MarketPrice::Whole(3_300), MarketPrice::Whole(3_300))],
+            "точка в час: последняя цена, «нет в продаже» историю не трогает"
+        );
     }
 
     #[tokio::test]
