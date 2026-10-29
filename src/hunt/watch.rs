@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Local};
+use chrono::{DateTime, Duration, Local, Timelike};
 use serde::{Deserialize, Serialize};
 
 use crate::geo::GeoPoint;
@@ -19,6 +19,37 @@ pub enum Goal {
     /// Дождаться цены одного товара по ссылке на его страницу (в `link`): не дороже `price`. Рынка тут нет —
     /// это запланированная покупка. `without_card` — сравнивать с ценой без Ozon Карты.
     TargetPrice { price: u64, without_card: bool },
+}
+
+/// Часы, в которые слежка проверяет площадку: с `from` часов включительно до `to` часов. `from` больше `to` —
+/// через полночь (с 22 до 7). Меньше заходов на сайты ночью — и ни одного уведомления, пока вы спите.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hours {
+    pub from: u32,
+    pub to: u32,
+}
+
+impl Hours {
+    pub fn contains(self, at: DateTime<Local>) -> bool {
+        let hour = at.hour();
+        if self.from <= self.to {
+            (self.from..self.to).contains(&hour)
+        } else {
+            hour >= self.from || hour < self.to
+        }
+    }
+
+    /// Ближайшее начало часов не раньше `at`.
+    pub fn next_start(self, at: DateTime<Local>) -> DateTime<Local> {
+        let start_on = |day: chrono::NaiveDate| {
+            day.and_hms_opt(self.from, 0, 0)
+                .and_then(|start| start.and_local_timezone(Local).earliest())
+        };
+        let today = start_on(at.date_naive()).filter(|&start| start >= at);
+        today
+            .or_else(|| start_on(at.date_naive() + Duration::days(1)))
+            .unwrap_or(at)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +84,10 @@ pub struct Watch {
     #[serde(default)]
     pub new_only: bool,
     pub every_minutes: u32,
+    /// Когда проверять; `None` — круглосуточно (так читаются и слежки, сохранённые до появления часов).
+    /// «Проверить сейчас» и пробная проверка работают в любое время.
+    #[serde(default)]
+    pub hours: Option<Hours>,
     pub enabled: bool,
 }
 
@@ -77,6 +112,7 @@ impl Watch {
             shop: ShopConditions::default(),
             new_only: false,
             every_minutes: 15,
+            hours: None,
             enabled: true,
         }
     }
@@ -107,6 +143,14 @@ impl Watch {
             && min > max
         {
             problems.push("Цена «от» больше цены «до»".to_string());
+        }
+        if let Some(hours) = self.hours {
+            if hours.from == hours.to {
+                problems.push("Часы «с» и «до» совпадают — уберите галочку, если проверять круглосуточно".to_string());
+            }
+            if hours.from > 23 || hours.to > 23 {
+                problems.push("Часы — от 0 до 23".to_string());
+            }
         }
         if self.every_minutes < self.source.min_interval_minutes() {
             problems.push(format!(
@@ -225,7 +269,19 @@ impl Watch {
     }
 
     pub fn is_due(&self, last_run: Option<DateTime<Local>>, now: DateTime<Local>) -> bool {
-        self.enabled && last_run.is_none_or(|last| now - last >= Duration::minutes(i64::from(self.every_minutes)))
+        self.enabled
+            && self.hours.is_none_or(|hours| hours.contains(now))
+            && last_run.is_none_or(|last| now - last >= Duration::minutes(i64::from(self.every_minutes)))
+    }
+
+    /// Когда слежка проверит площадку после проверки в `last_run`: через свой интервал, а выпадет на нерабочие
+    /// часы — в начале следующих.
+    pub fn next_check(&self, last_run: DateTime<Local>) -> DateTime<Local> {
+        let due = last_run + Duration::minutes(i64::from(self.every_minutes));
+        match self.hours {
+            Some(hours) if !hours.contains(due) => hours.next_start(due),
+            _ => due,
+        }
     }
 }
 
@@ -526,5 +582,74 @@ mod tests {
             }
             .is_due(None, now)
         );
+    }
+
+    fn at(day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local.with_ymd_and_hms(2026, 10, day, hour, minute, 0).unwrap()
+    }
+
+    #[test]
+    fn hours_include_the_start_exclude_the_end_and_may_cross_midnight() {
+        let day = Hours { from: 8, to: 23 };
+        assert!(!day.contains(at(29, 7, 59)));
+        assert!(day.contains(at(29, 8, 0)));
+        assert!(day.contains(at(29, 22, 59)));
+        assert!(!day.contains(at(29, 23, 0)));
+
+        let night = Hours { from: 22, to: 7 };
+        assert!(night.contains(at(29, 23, 30)));
+        assert!(night.contains(at(30, 6, 59)));
+        assert!(!night.contains(at(30, 7, 0)));
+        assert!(!night.contains(at(29, 12, 0)));
+    }
+
+    #[test]
+    fn watch_outside_its_hours_waits_and_names_the_next_start() {
+        let daytime = Watch {
+            hours: Some(Hours { from: 8, to: 23 }),
+            every_minutes: 30,
+            ..watch()
+        };
+        assert!(
+            !daytime.is_due(None, at(29, 23, 10)),
+            "ночью не проверяет даже ни разу не проверенную"
+        );
+        assert!(daytime.is_due(Some(at(29, 22, 40)), at(30, 8, 0)));
+
+        assert_eq!(daytime.next_check(at(29, 22, 0)), at(29, 22, 30));
+        assert_eq!(
+            daytime.next_check(at(29, 22, 40)),
+            at(30, 8, 0),
+            "23:10 — уже нерабочее время"
+        );
+        assert_eq!(
+            daytime.next_check(at(30, 7, 0)),
+            at(30, 8, 0),
+            "рано утром — с начала часов того же дня"
+        );
+        assert_eq!(
+            watch().next_check(at(29, 22, 40)),
+            at(29, 22, 55),
+            "круглосуточная — просто через интервал"
+        );
+    }
+
+    #[test]
+    fn same_or_impossible_hours_are_reported_and_old_watches_run_around_the_clock() {
+        let same = Watch {
+            hours: Some(Hours { from: 9, to: 9 }),
+            ..watch()
+        };
+        assert!(same.problems(false)[0].starts_with("Часы «с» и «до» совпадают"));
+        let impossible = Watch {
+            hours: Some(Hours { from: 8, to: 24 }),
+            ..watch()
+        };
+        assert_eq!(impossible.problems(false), ["Часы — от 0 до 23"]);
+
+        let mut saved = serde_json::to_value(watch()).unwrap();
+        saved.as_object_mut().unwrap().remove("hours");
+        assert_eq!(serde_json::from_value::<Watch>(saved).unwrap().hours, None);
     }
 }

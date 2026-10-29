@@ -3,9 +3,12 @@ use std::str::FromStr;
 use eframe::egui::{self, RichText};
 
 use super::{BAD, WARN, trial};
-use crate::hunt::{Category, Goal, TrialStatus, Watch};
+use crate::hunt::{Category, Goal, Hours, TrialStatus, Watch};
 use crate::marketplace::SourceKind;
 use crate::search::{PriceRange, ShopConditions};
+
+/// Часы, которые форма предлагает, когда ставят галочку «Только в часы».
+const DAYTIME: Hours = Hours { from: 8, to: 23 };
 
 pub(super) enum FormAction {
     Keep,
@@ -51,6 +54,7 @@ pub(super) struct WatchForm {
     shop: ShopConditions,
     new_only: bool,
     every_minutes: u32,
+    hours: Option<Hours>,
     pub(super) problems: Vec<String>,
 }
 
@@ -92,6 +96,7 @@ impl WatchForm {
             shop: watch.shop,
             new_only: watch.new_only,
             every_minutes: watch.every_minutes,
+            hours: watch.hours,
             problems: Vec::new(),
         }
     }
@@ -362,6 +367,27 @@ impl WatchForm {
             ));
         });
         ui.end_row();
+
+        ui.label("Часы работы");
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let mut limited = self.hours.is_some();
+                if ui.checkbox(&mut limited, "Только в часы").changed() {
+                    self.hours = limited.then_some(DAYTIME);
+                }
+                if let Some(hours) = &mut self.hours {
+                    ui.label("с");
+                    ui.add(egui::DragValue::new(&mut hours.from).range(0..=23).suffix(":00"));
+                    ui.label("до");
+                    ui.add(egui::DragValue::new(&mut hours.to).range(0..=23).suffix(":00"));
+                }
+            });
+            ui.weak(
+                "Вне этих часов слежка не заходит на сайт и ничего не присылает; «Проверить сейчас» работает всегда. \
+                 Можно и через полночь — с 22 до 7.",
+            );
+        });
+        ui.end_row();
     }
 
     fn goal_details(&mut self, ui: &mut egui::Ui) {
@@ -461,6 +487,7 @@ impl WatchForm {
             },
             new_only: self.new_only && self.source.has_used_goods(),
             every_minutes: self.every_minutes,
+            hours: self.hours,
             enabled: self.enabled,
         })
     }
@@ -527,6 +554,7 @@ mod tests {
             shop: ShopConditions::default(),
             new_only: true,
             every_minutes: 20,
+            hours: Some(Hours { from: 22, to: 7 }),
             enabled: false,
         };
         assert_eq!(WatchForm::edit(&watch).to_watch(), Ok(watch));

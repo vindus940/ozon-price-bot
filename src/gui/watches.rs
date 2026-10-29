@@ -1,10 +1,9 @@
-use chrono::Duration;
 use eframe::egui::{self, Color32, RichText};
 
 use super::watch_form::WatchForm;
 use super::{BAD, GOOD, WARN};
 use crate::format::rub;
-use crate::hunt::{Goal, Hunter, Outcome, Pause, RunStatus, Watch};
+use crate::hunt::{Goal, Hours, Hunter, Outcome, Pause, RunStatus, Watch};
 use crate::marketplace::SourceKind;
 
 pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, form: &mut Option<WatchForm>, pending_delete: &mut Option<u64>) {
@@ -124,7 +123,7 @@ fn goal_summary(goal: Goal) -> String {
 
 fn conditions(watch: &Watch) -> String {
     if watch.target_price().is_some() {
-        return format!("товар по ссылке · каждые {} мин", watch.every_minutes);
+        return format!("товар по ссылке · {}", when_checked(watch));
     }
     let mut parts = vec![format!("ищу «{}»", watch.query)];
     if watch.link.is_some() {
@@ -152,8 +151,21 @@ fn conditions(watch: &Watch) -> String {
     if !watch.stop_words.is_empty() {
         parts.push(format!("без: {}", watch.stop_words.join(", ")));
     }
-    parts.push(format!("каждые {} мин", watch.every_minutes));
+    parts.push(when_checked(watch));
     parts.join(" · ")
+}
+
+/// «каждые 15 мин» или «каждые 15 мин с 8:00 до 23:00».
+fn when_checked(watch: &Watch) -> String {
+    let every = format!("каждые {} мин", watch.every_minutes);
+    match watch.hours {
+        Some(hours) => format!("{every} {}", hours_text(hours)),
+        None => every,
+    }
+}
+
+fn hours_text(hours: Hours) -> String {
+    format!("с {}:00 до {}:00", hours.from, hours.to)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -189,10 +201,19 @@ fn status_line(
         return match (watch.enabled, paused) {
             (false, _) => ("Выключена".into(), normal),
             (true, Some(paused)) => (format!("Ещё не проверялась.{paused}"), WARN),
-            (true, None) => (
-                "Ещё не проверялась — первая проверка начнётся в течение минуты".into(),
-                normal,
-            ),
+            (true, None) => match watch.hours {
+                Some(hours) => (
+                    format!(
+                        "Ещё не проверялась — первая проверка в часы слежки, {}",
+                        hours_text(hours)
+                    ),
+                    normal,
+                ),
+                None => (
+                    "Ещё не проверялась — первая проверка начнётся в течение минуты".into(),
+                    normal,
+                ),
+            },
         };
     };
 
@@ -202,8 +223,13 @@ fn status_line(
         Some(_) if matches!(run.outcome, Outcome::Failed(_)) => String::new(),
         Some(paused) => paused,
         None if watch.enabled => {
-            let next = run.at + Duration::minutes(i64::from(watch.every_minutes));
-            format!(" Следующая проверка в {}.", next.format("%H:%M"))
+            let next = watch.next_check(run.at);
+            let day = if next.date_naive() == run.at.date_naive() {
+                String::new()
+            } else {
+                format!(" {}", next.format("%d.%m"))
+            };
+            format!(" Следующая проверка{day} в {}.", next.format("%H:%M"))
         }
         None => String::new(),
     };
@@ -435,6 +461,26 @@ mod tests {
         assert!(line(Some(3_400)).0.contains("уже не дороже цели 3\u{a0}500\u{a0}₽"));
         assert_eq!(line(None).1, WARN);
         assert_eq!(conditions(&headphones), "товар по ссылке · каждые 15 мин");
+    }
+
+    #[test]
+    fn watch_with_hours_names_them_and_the_next_check_on_the_next_morning() {
+        let daytime = Watch {
+            hours: Some(Hours { from: 8, to: 23 }),
+            ..drill()
+        };
+        let late = RunStatus {
+            at: Local.with_ymd_and_hms(2026, 10, 3, 22, 50, 0).unwrap(),
+            outcome: checked(Some(MarketPrice::Whole(4_463))),
+        };
+
+        let (text, _) = status_line(&daytime, Activity::Waiting, Some(late), None);
+        assert!(text.ends_with("Следующая проверка 04.10 в 08:00."), "{text}");
+        assert!(conditions(&daytime).ends_with("каждые 15 мин с 8:00 до 23:00"));
+        assert_eq!(
+            status_line(&daytime, Activity::Waiting, None, None).0,
+            "Ещё не проверялась — первая проверка в часы слежки, с 8:00 до 23:00"
+        );
     }
 
     #[test]

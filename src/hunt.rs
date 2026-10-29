@@ -42,7 +42,7 @@ use schedule::Schedule;
 pub use schedule::{Outcome, Pause, RunStatus};
 pub use trial::TrialStatus;
 use trial::Trials;
-pub use watch::{Goal, Watch};
+pub use watch::{Goal, Hours, Watch};
 
 use crate::format;
 use crate::geo::GeoPoint;

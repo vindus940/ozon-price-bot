@@ -172,6 +172,26 @@ mod tests {
     }
 
     #[test]
+    fn outside_its_hours_watch_waits_but_the_button_still_works() {
+        use chrono::TimeZone;
+        let night = Local.with_ymd_and_hms(2026, 10, 29, 2, 0, 0).unwrap();
+        let daytime = [Watch {
+            hours: Some(crate::hunt::Hours { from: 8, to: 23 }),
+            ..watch(1)
+        }];
+        let mut schedule = Schedule::default();
+
+        assert_eq!(schedule.next(&daytime, night), None);
+        schedule.check_soon(1);
+        assert_eq!(schedule.next(&daytime, night), Some(1));
+        assert_eq!(
+            schedule.next(&daytime, night + Duration::hours(6)),
+            Some(1),
+            "в 8:00 — по расписанию"
+        );
+    }
+
+    #[test]
     fn button_goes_first_then_whatever_is_due() {
         let now = Local::now();
         let watches = [watch(1), watch(2)];
