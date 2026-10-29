@@ -7,6 +7,7 @@ mod gui;
 mod health;
 mod hunt;
 mod instance;
+mod logs;
 mod marketplace;
 mod offer;
 mod quantity;
@@ -18,6 +19,7 @@ mod text;
 mod wait;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -40,7 +42,7 @@ use crate::telegram::TelegramAlerts;
 fn main() -> Result<()> {
     let app_dir = config::app_dir();
     dotenvy::from_path(app_dir.join(".env")).ok();
-    init_logging();
+    init_logging(app_dir.join("logs"));
 
     let data_dir = app_dir.join("data");
     let Some(_instance) = instance::claim(&data_dir)? else {
@@ -122,9 +124,24 @@ async fn open_ozon(ozon: Arc<Ozon>) {
     }
 }
 
-fn init_logging() {
+fn init_logging(dir: PathBuf) {
+    use std::io::Write;
+
+    use pretty_env_logger::env_logger::{Builder, Target};
+
     // Видеодрайверы шлют в лог «ошибки», которые на работу окна не влияют и только пугают.
-    pretty_env_logger::formatted_timed_builder()
+    // Время — местное: журнал читают, чтобы понять, что было ночью по часам на стене, а не по Гринвичу.
+    Builder::new()
+        .target(Target::Pipe(Box::new(logs::DailyLog::new(dir))))
+        .format(|out, record| {
+            writeln!(
+                out,
+                "{} {:<5} {}",
+                chrono::Local::now().format("%d.%m %H:%M:%S"),
+                record.level(),
+                record.args()
+            )
+        })
         .filter_level(log::LevelFilter::Info)
         .filter_module("wgpu_hal", log::LevelFilter::Off)
         .filter_module("wgpu_core", log::LevelFilter::Warn)
