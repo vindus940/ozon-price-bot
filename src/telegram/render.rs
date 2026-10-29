@@ -1,6 +1,9 @@
 use crate::format::{price_drop, rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
-use crate::hunt::{Alert, Deal, Goal, Lowest, Watch};
+use teloxide::types::BotCommand;
+
+use super::WatchAction;
+use crate::hunt::{Alert, Deal, Goal, Lowest, Outcome, RunStatus, Watch};
 use crate::marketplace::{Product, SourceError};
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
@@ -30,7 +33,107 @@ pub(super) const HELP: &str = "Напишите, что ищете, — приш
 
 Сначала идут самые дешёвые, но можно иначе:
 <code>наушники sony по скидке</code> — сначала с самой большой скидкой
-<code>наушники sony цена-качество</code> — и недорого, и хорошо оценено многими покупателями";
+<code>наушники sony цена-качество</code> — и недорого, и хорошо оценено многими покупателями
+
+Слежками, заведёнными в окне программы, можно управлять отсюда:
+/watches — список с номерами и итогами проверок
+<code>/pause 3</code> — пауза, <code>/resume 3</code> — снова следить, <code>/check 3</code> — проверить сейчас";
+
+/// Меню команд у поля ввода в Telegram.
+pub(super) fn commands() -> Vec<BotCommand> {
+    [
+        ("watches", "Слежки: номера и итоги проверок"),
+        ("pause", "Пауза слежки: /pause 3"),
+        ("resume", "Снова следить: /resume 3"),
+        ("check", "Проверить сейчас: /check 3"),
+        ("help", "Как писать запрос"),
+    ]
+    .into_iter()
+    .map(|(command, description)| BotCommand::new(command, description))
+    .collect()
+}
+
+/// Список слежек для `/watches`: номер — для команд, состояние и итог последней проверки. Сколько влезает
+/// в одно сообщение — остальные видны в окне программы.
+pub(super) fn watch_list(watches: &[(Watch, Option<RunStatus>)]) -> String {
+    if watches.is_empty() {
+        return "Слежек пока нет — их заводят в окне программы на компьютере.".to_string();
+    }
+    let footer = "\nПауза: /pause N · снова следить: /resume N · проверить сейчас: /check N";
+    let mut length = footer.chars().count();
+    let entries: Vec<String> = watches
+        .iter()
+        .map(|(watch, status)| watch_entry(watch, status.as_ref()))
+        .take_while(|entry| {
+            length += entry.chars().count();
+            length <= MESSAGE_LIMIT - 100
+        })
+        .collect();
+    let rest = watches.len() - entries.len();
+    let tail = if rest > 0 {
+        format!("\n…и ещё {rest} — в окне программы.")
+    } else {
+        String::new()
+    };
+    format!("{}{tail}\n{footer}", entries.concat())
+}
+
+fn watch_entry(watch: &Watch, status: Option<&RunStatus>) -> String {
+    let state = if watch.enabled {
+        "▶️"
+    } else {
+        "⏸ на паузе,"
+    };
+    let last = status.map_or_else(|| "ещё не проверялась".to_string(), last_check);
+    format!(
+        "<b>№{}</b> {state} «{}» — {}\n{last}\n",
+        watch.id,
+        escape(&watch.name),
+        goal_summary(watch)
+    )
+}
+
+fn last_check(run: &RunStatus) -> String {
+    let at = run.at.format("%d.%m %H:%M");
+    let outcome = match &run.outcome {
+        Outcome::Checked {
+            market: Some(market),
+            suitable,
+            ..
+        } => format!("рынок {market}, выгодных сейчас {suitable}"),
+        Outcome::Checked { comparable, .. } => format!("похожих только {comparable} — рынок не посчитать"),
+        Outcome::Priced(Some(price)) => format!("сейчас {}", rub(*price)),
+        Outcome::Priced(None) => "товара нет в продаже".to_string(),
+        Outcome::Failed(reason) => format!("проверка не удалась — {}", escape(reason)),
+    };
+    format!("{at}: {outcome}")
+}
+
+pub(super) fn which_watch(action: WatchAction) -> String {
+    format!("Напишите номер слежки: {} 3. Номера — в /watches.", action.command())
+}
+
+pub(super) fn no_such_watch(watch_id: u64) -> String {
+    format!("Слежки №{watch_id} нет. Номера — в /watches.")
+}
+
+pub(super) fn watch_done(action: WatchAction, watch: &Watch) -> String {
+    let name = escape(&watch.name);
+    match action {
+        WatchAction::Pause => format!(
+            "⏸ «{name}» на паузе: проверок и сообщений не будет. Снова следить: /resume {}",
+            watch.id
+        ),
+        WatchAction::Resume => format!(
+            "▶️ «{name}» снова следит ({}). Проверю, как подойдёт срок; сразу — /check {}",
+            goal_summary(watch),
+            watch.id
+        ),
+        WatchAction::Check => {
+            format!("🔎 «{name}» встала в очередь на проверку. Если найдётся новое — пришлю отдельным сообщением.")
+        }
+    }
+}
 
 pub(super) fn access_denied(user_id: u64) -> String {
     format!("Доступ закрыт. Ваш Telegram ID: {user_id}. Впишите его в ALLOWED_USERS в файле .env и перезапустите бота.")
@@ -771,6 +874,59 @@ mod tests {
             alert(&Alert::Recovered { watch: &watch }),
             "✅ Слежка «Шуруповёрт» снова проверяет Авито — дальше пишу о новых находках, как обычно."
         );
+    }
+
+    #[test]
+    fn watch_list_numbers_watches_and_shows_their_last_check() {
+        let at = Local.with_ymd_and_hms(2026, 10, 29, 12, 0, 0).unwrap();
+        let drill = Watch { id: 3, ..drill_watch() };
+        let paused = Watch {
+            id: 5,
+            enabled: false,
+            ..headphones_watch(false)
+        };
+        let text = watch_list(&[
+            (
+                drill,
+                Some(RunStatus {
+                    at,
+                    outcome: Outcome::Failed("Авито просит <проверку>".into()),
+                }),
+            ),
+            (
+                paused,
+                Some(RunStatus {
+                    at,
+                    outcome: Outcome::Priced(Some(3_870)),
+                }),
+            ),
+        ]);
+
+        assert!(text.starts_with(
+            "<b>№3</b> ▶️ «Шуруповёрт» — Авито, перепродажа: выгода от 2\u{a0}000\u{a0}₽, до 5 км от дома\n\
+             29.10 12:00: проверка не удалась — Авито просит &lt;проверку&gt;\n"
+        ));
+        assert!(text.contains(
+            "<b>№5</b> ⏸ на паузе, «Наушники к зиме» — Ozon, цена товара не дороже 3\u{a0}500\u{a0}₽\n\
+             29.10 12:00: сейчас 3\u{a0}870\u{a0}₽\n"
+        ));
+        assert!(text.ends_with("проверить сейчас: /check N"));
+        assert!(watch_list(&[]).starts_with("Слежек пока нет"));
+    }
+
+    #[test]
+    fn watch_commands_answer_with_the_next_step() {
+        let watch = Watch { id: 3, ..drill_watch() };
+        assert_eq!(
+            watch_done(WatchAction::Pause, &watch),
+            "⏸ «Шуруповёрт» на паузе: проверок и сообщений не будет. Снова следить: /resume 3"
+        );
+        assert!(watch_done(WatchAction::Resume, &watch).ends_with("сразу — /check 3"));
+        assert_eq!(
+            which_watch(WatchAction::Check),
+            "Напишите номер слежки: /check 3. Номера — в /watches."
+        );
+        assert_eq!(commands().len(), 5);
     }
 
     fn headphones_watch(without_card: bool) -> Watch {

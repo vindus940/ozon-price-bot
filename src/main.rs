@@ -96,7 +96,13 @@ fn main() -> Result<()> {
         let parser_check = config
             .self_check
             .map(|settings| ParserCheck::new(Arc::clone(&ozon), settings));
-        runtime.spawn(telegram::run(bot, telegram, OfferSearch::new(ozon), parser_check));
+        runtime.spawn(telegram::run(
+            bot,
+            telegram,
+            OfferSearch::new(ozon),
+            Arc::clone(&hunter),
+            parser_check,
+        ));
     } else {
         log::warn!("Telegram не настроен: окно работает, уведомлений не будет");
     }
