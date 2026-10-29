@@ -51,10 +51,14 @@ fn card(
                 hunter.set_enabled(watch.id, enabled);
             }
             ui.label(RichText::new(&watch.name).strong().size(16.0));
+            let category = if watch.target_price().is_some() {
+                String::new()
+            } else {
+                format!(" · {}", watch.category.title())
+            };
             ui.weak(format!(
-                "{} · {} · {}",
+                "{}{category} · {}",
                 watch.source.title(),
-                watch.category.title(),
                 goal_summary(watch.goal)
             ));
         });
@@ -110,10 +114,18 @@ fn goal_summary(goal: Goal) -> String {
     match goal {
         Goal::BelowMarket { min_discount_percent } => format!("ниже рынка от {min_discount_percent}%"),
         Goal::Resale { min_profit, .. } => format!("перепродажа: выгода от {}", rub(min_profit)),
+        Goal::TargetPrice { price, without_card } => format!(
+            "цена товара не дороже {}{}",
+            rub(price),
+            if without_card { " без Ozon Карты" } else { "" }
+        ),
     }
 }
 
 fn conditions(watch: &Watch) -> String {
+    if watch.target_price().is_some() {
+        return format!("товар по ссылке · каждые {} мин", watch.every_minutes);
+    }
     let mut parts = vec![format!("ищу «{}»", watch.query)];
     if watch.link.is_some() {
         parts.push("по ссылке с фильтрами сайта".into());
@@ -224,6 +236,19 @@ fn status_line(
             ),
             WARN,
         ),
+        Outcome::Priced(Some(price)) => {
+            let target = watch.target_price().unwrap_or_default();
+            let (verdict, color) = if price <= target {
+                ("уже не дороже цели", GOOD)
+            } else {
+                ("цель", normal)
+            };
+            (
+                format!("{at}: сейчас {} — {verdict} {}.{next}", rub(price), rub(target)),
+                color,
+            )
+        }
+        Outcome::Priced(None) => (format!("{at}: товара нет в продаже.{next}"), WARN),
         Outcome::Failed(reason) => (format!("{at}: проверка не удалась — {reason}.{next}"), BAD),
     }
 }
@@ -382,6 +407,34 @@ mod tests {
             status_line(&switched_off(), Activity::Waiting, None, Some(Pause::UntilManualCheck)).0,
             "Выключена"
         );
+    }
+
+    #[test]
+    fn product_watch_shows_its_price_against_the_target() {
+        let headphones = Watch {
+            goal: Goal::TargetPrice {
+                price: 3_500,
+                without_card: false,
+            },
+            ..drill()
+        };
+        let line = |price| {
+            status_line(
+                &headphones,
+                Activity::Waiting,
+                Some(at_noon(Outcome::Priced(price))),
+                None,
+            )
+        };
+
+        assert_eq!(
+            line(Some(3_870)).0,
+            "12:00: сейчас 3\u{a0}870\u{a0}₽ — цель 3\u{a0}500\u{a0}₽. Следующая проверка в 12:15."
+        );
+        assert_eq!(line(Some(3_400)).1, GOOD);
+        assert!(line(Some(3_400)).0.contains("уже не дороже цели 3\u{a0}500\u{a0}₽"));
+        assert_eq!(line(None).1, WARN);
+        assert_eq!(conditions(&headphones), "товар по ссылке · каждые 15 мин");
     }
 
     #[test]

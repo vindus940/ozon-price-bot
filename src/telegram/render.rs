@@ -1,7 +1,7 @@
 use crate::format::{price_drop, rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
 use crate::hunt::{Alert, Deal, Goal, Lowest, Watch};
-use crate::marketplace::SourceError;
+use crate::marketplace::{Product, SourceError};
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
 
@@ -279,13 +279,85 @@ pub(super) fn alert(alert: &Alert<'_>) -> String {
             escape(&watch.name),
             watch.source.title()
         ),
+        Alert::PriceStarted { watch, product } => {
+            let target = target_price(watch);
+            let now = match watch.product_price(product) {
+                None => format!("Сейчас товара нет в продаже — напишу, когда появится не дороже {target}."),
+                Some(price) if watch.target_price().is_some_and(|target| price <= target) => {
+                    format!("Сейчас {} — уже не дороже цели.", rub(price))
+                }
+                Some(price) => format!("Сейчас {} — напишу, когда будет не дороже {target}.", rub(price)),
+            };
+            format!(
+                "🔎 Слежка «{}» запущена ({}). {now}{}",
+                escape(&watch.name),
+                goal_summary(watch),
+                product_lines(watch, product)
+            )
+        }
+        Alert::PriceReached { watch, product, before } => {
+            let price = watch.product_price(product).unwrap_or_default();
+            let drop = before
+                .map(|before| format!("\n⬇️ Подешевело: {}", price_drop(before, price)))
+                .unwrap_or_default();
+            format!(
+                "🎯 «{}»: цена дошла до цели — <b>{}</b> (цель {}){drop}{}",
+                escape(&watch.name),
+                rub(price),
+                target_price(watch),
+                product_lines(watch, product)
+            )
+        }
+        Alert::PriceRose { watch, product } => {
+            let now = match watch.product_price(product) {
+                Some(price) => format!("цена снова выше цели — {} (цель {})", rub(price), target_price(watch)),
+                None => "товара больше нет в продаже".to_string(),
+            };
+            format!(
+                "↗️ «{}»: {now}. Напишу, когда опять будет не дороже {}.{}",
+                escape(&watch.name),
+                target_price(watch),
+                product_lines(watch, product)
+            )
+        }
     }
+}
+
+fn target_price(watch: &Watch) -> String {
+    watch.target_price().map(rub).unwrap_or_default()
+}
+
+/// Под сообщением о товаре — вторая цена Ozon, если она другая (с картой или без), и ссылка на товар.
+fn product_lines(watch: &Watch, product: &Product) -> String {
+    let other = match (product.price, product.price_without_card, watch.goal) {
+        (Some(with_card), Some(without_card), _) if with_card == without_card => String::new(),
+        (Some(with_card), Some(_), Goal::TargetPrice { without_card: true, .. }) => {
+            format!("\nС Ozon Картой — {}", rub(with_card))
+        }
+        (Some(_), Some(without_card), _) => format!("\nБез Ozon Карты — {}", rub(without_card)),
+        _ => String::new(),
+    };
+    let link = watch.link.as_deref().unwrap_or_default();
+    let link = watch
+        .source
+        .parse_product_link(link)
+        .map_or_else(|_| link.to_string(), |url| url.to_string());
+    format!(
+        "{other}\n<a href=\"{}\">{}</a>",
+        escape(&link),
+        escape(&shorten(&product.name, NAME_LIMIT))
+    )
 }
 
 fn goal_summary(watch: &Watch) -> String {
     let goal = match watch.goal {
         Goal::BelowMarket { min_discount_percent } => format!("ниже рынка от {min_discount_percent}%"),
         Goal::Resale { min_profit, .. } => format!("перепродажа: выгода от {}", rub(min_profit)),
+        Goal::TargetPrice { price, without_card } => format!(
+            "цена товара не дороже {}{}",
+            rub(price),
+            if without_card { " без Ozon Карты" } else { "" }
+        ),
     };
     let radius = watch
         .radius_km
@@ -699,6 +771,81 @@ mod tests {
             alert(&Alert::Recovered { watch: &watch }),
             "✅ Слежка «Шуруповёрт» снова проверяет Авито — дальше пишу о новых находках, как обычно."
         );
+    }
+
+    fn headphones_watch(without_card: bool) -> Watch {
+        Watch {
+            name: "Наушники к зиме".into(),
+            link: Some("https://www.ozon.ru/product/sony-wh-ch520-895366703/?at=share".into()),
+            goal: Goal::TargetPrice {
+                price: 3_500,
+                without_card,
+            },
+            ..Watch::new_draft()
+        }
+    }
+
+    fn headphones(price: Option<u64>, without_card: Option<u64>) -> Product {
+        Product {
+            name: "Sony WH-CH520 <черные>".into(),
+            price,
+            price_without_card: without_card,
+        }
+    }
+
+    #[test]
+    fn product_watch_start_says_the_price_now_and_what_it_waits_for() {
+        let watch = headphones_watch(false);
+        let text = alert(&Alert::PriceStarted {
+            watch: &watch,
+            product: &headphones(Some(3_870), Some(3_990)),
+        });
+        assert_eq!(
+            text,
+            "🔎 Слежка «Наушники к зиме» запущена (Ozon, цена товара не дороже 3\u{a0}500\u{a0}₽). \
+             Сейчас 3\u{a0}870\u{a0}₽ — напишу, когда будет не дороже 3\u{a0}500\u{a0}₽.\n\
+             Без Ozon Карты — 3\u{a0}990\u{a0}₽\n\
+             <a href=\"https://www.ozon.ru/product/sony-wh-ch520-895366703/\">Sony WH-CH520 &lt;черные&gt;</a>"
+        );
+        let sold_out = alert(&Alert::PriceStarted {
+            watch: &watch,
+            product: &headphones(None, None),
+        });
+        assert!(sold_out.contains("Сейчас товара нет в продаже — напишу, когда появится не дороже 3\u{a0}500\u{a0}₽."));
+    }
+
+    #[test]
+    fn reached_target_names_the_compared_price_the_drop_and_the_other_price() {
+        let watch = headphones_watch(true);
+        let text = alert(&Alert::PriceReached {
+            watch: &watch,
+            product: &headphones(Some(3_300), Some(3_450)),
+            before: Some(3_490),
+        });
+        assert!(
+            text.starts_with(
+                "🎯 «Наушники к зиме»: цена дошла до цели — <b>3\u{a0}450\u{a0}₽</b> (цель 3\u{a0}500\u{a0}₽)\n\
+                 ⬇️ Подешевело: 3\u{a0}490\u{a0}₽ → 3\u{a0}450\u{a0}₽ (−1%)\n\
+                 С Ozon Картой — 3\u{a0}300\u{a0}₽\n"
+            ),
+            "без карты сравнивается цена без карты, а вторая — с картой: {text}"
+        );
+    }
+
+    #[test]
+    fn risen_price_or_sold_out_is_one_short_line() {
+        let watch = headphones_watch(false);
+        let rose = |price| {
+            alert(&Alert::PriceRose {
+                watch: &watch,
+                product: &headphones(price, None),
+            })
+        };
+        assert!(rose(Some(3_700)).starts_with(
+            "↗️ «Наушники к зиме»: цена снова выше цели — 3\u{a0}700\u{a0}₽ (цель 3\u{a0}500\u{a0}₽). \
+             Напишу, когда опять будет не дороже 3\u{a0}500\u{a0}₽."
+        ));
+        assert!(rose(None).starts_with("↗️ «Наушники к зиме»: товара больше нет в продаже. Напишу"));
     }
 
     #[test]

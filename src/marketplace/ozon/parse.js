@@ -104,5 +104,25 @@
   // x-o3-antibot-score и x-o3-antibot-processed есть на любой странице Ozon, и запрос без товаров («1») выглядел капчей.
   const isRobotCheck = html => /(?<!x-o3-)antibot|captcha|доступ ограничен|не робот/i.test(html);
 
-  return { gridItems, nextPortionPath, toOffer, isRobotCheck };
+  // Страница одного товара: название — в заголовке, цены — в виджете webPrice: cardPrice с Ozon Картой (её же
+  // показывает плитка выдачи), price — без карты. Нет cardPrice — цена одна для всех. Нет в продаже — isAvailable: false.
+  const productOf = widgets => {
+    const stateOf = prefix => widgets
+      .filter(([name]) => name.startsWith(prefix))
+      .map(([, state]) => parseJson(state))
+      .find(Boolean);
+    const heading = stateOf('webProductHeading');
+    if (!heading?.title) return null;
+    const prices = stateOf('webPrice');
+    const available = !!prices && prices.isAvailable !== false;
+    const withCard = available && prices.cardPrice ? rubles(prices.cardPrice) : null;
+    const withoutCard = available && prices.price ? rubles(prices.price) : null;
+    return {
+      name: clean(heading.title),
+      price: withCard ?? withoutCard,
+      price_without_card: withCard === null ? null : withoutCard,
+    };
+  };
+
+  return { gridItems, nextPortionPath, toOffer, isRobotCheck, productOf };
 })()

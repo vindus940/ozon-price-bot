@@ -112,6 +112,8 @@ pub fn evaluate(goal: Goal, radius_km: Option<u32>, market: Market, offer: &Offe
                 suspicious,
             })
         }
+        // Товар по ссылке с рынком не сравнивается: его цену проверяет охотник напрямую.
+        Goal::TargetPrice { .. } => None,
     }
 }
 

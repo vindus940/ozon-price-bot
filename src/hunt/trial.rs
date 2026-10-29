@@ -1,5 +1,6 @@
 use crate::hunt::assess::Assessment;
 use crate::hunt::watch::Watch;
+use crate::marketplace::Product;
 
 /// Что видно в форме о пробной проверке.
 #[derive(Debug, Clone)]
@@ -8,6 +9,8 @@ pub enum TrialStatus {
     Queued,
     Checking,
     Done(Assessment),
+    /// Слежка за товаром: что сейчас на его странице.
+    Priced(Product),
     Failed(String),
 }
 

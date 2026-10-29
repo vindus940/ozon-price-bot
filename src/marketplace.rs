@@ -120,6 +120,46 @@ impl SourceKind {
         link.set_host(Some(self.site())).map_err(|_| not_a_link())?;
         Ok(link)
     }
+
+    /// Страницу одного товара читают магазины. У объявлений Авито её не читаем: каждая проверка — лишний переход
+    /// на сайт, который и так ограничивал адрес за частые заходы.
+    pub fn has_product_pages(self) -> bool {
+        matches!(self, SourceKind::Ozon | SourceKind::Dns)
+    }
+
+    /// Две цены — с картой магазина и без неё — у Ozon (Ozon Карта); у ДНС цена одна.
+    pub fn has_card_price(self) -> bool {
+        self == SourceKind::Ozon
+    }
+
+    /// Ссылка на страницу товара для слежки за его ценой: у Ozon и ДНС адрес товара начинается с `/product/`.
+    /// Параметры после `?` — метки, откуда пришли, цене они не нужны.
+    pub fn parse_product_link(self, text: &str) -> Result<Url, String> {
+        if !self.has_product_pages() {
+            return Err(format!(
+                "Следить за ценой товара по ссылке можно на Ozon и в ДНС, у {} — нет",
+                self.title()
+            ));
+        }
+        let mut link = self.parse_link(text)?;
+        if !link.path().starts_with("/product/") {
+            return Err(
+                "Это ссылка не на товар — откройте страницу товара и скопируйте адрес из адресной строки".to_string(),
+            );
+        }
+        link.set_query(None);
+        link.set_fragment(None);
+        Ok(link)
+    }
+}
+
+/// Товар со своей страницы. `price` — цена, которую площадка показывает первой (у Ozon — с Ozon Картой);
+/// `None` — товара нет в продаже. `price_without_card` — цена для тех, у кого Ozon Карты нет; есть только у Ozon.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Product {
+    pub name: String,
+    pub price: Option<u64>,
+    pub price_without_card: Option<u64>,
 }
 
 /// Где искать: вокруг точки в радиусе. Площадки без адресов товаров его не учитывают.
@@ -152,6 +192,9 @@ pub trait OfferSource: Send + Sync {
 
     /// То же, но по ссылке на выдачу с фильтрами, настроенными на самом сайте (`SourceKind::parse_link`).
     async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError>;
+
+    /// Цена одного товара по ссылке на его страницу (`SourceKind::parse_product_link`).
+    async fn product(&self, link: &Url) -> Result<Product, SourceError>;
 }
 
 #[cfg(test)]
@@ -161,7 +204,7 @@ pub mod testing {
     use async_trait::async_trait;
     use reqwest::Url;
 
-    use super::{Area, OfferSource, SourceError};
+    use super::{Area, OfferSource, Product, SourceError};
     use crate::offer::Offer;
 
     /// Площадка для тестов: отдаёт заданные предложения или просит проверку «я не робот» и запоминает запросы.
@@ -204,6 +247,12 @@ pub mod testing {
         async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
             self.search(link.as_str(), area).await
         }
+
+        async fn product(&self, link: &Url) -> Result<Product, SourceError> {
+            self.queries.lock().unwrap().push(link.to_string());
+            self.offers.as_ref().ok_or(SourceError::Captcha)?;
+            Err(anyhow::anyhow!("у подставной площадки нет страниц товаров").into())
+        }
     }
 }
 
@@ -234,5 +283,23 @@ mod tests {
             "без https:// — не адрес"
         );
         assert!(SourceKind::Ozon.parse_link("https://www.ozon.ru.example.com/").is_err());
+    }
+
+    #[test]
+    fn product_link_leads_to_a_product_page_of_a_shop() {
+        let link = SourceKind::Ozon
+            .parse_product_link("https://ozon.ru/product/sony-wh-ch520-895366703/?at=abc&from=share#reviews")
+            .unwrap();
+        assert_eq!(link.as_str(), "https://www.ozon.ru/product/sony-wh-ch520-895366703/");
+
+        let search = SourceKind::Dns
+            .parse_product_link("https://www.dns-shop.ru/search/?q=sony")
+            .unwrap_err();
+        assert!(search.starts_with("Это ссылка не на товар"), "{search}");
+
+        let avito = SourceKind::Avito
+            .parse_product_link("https://www.avito.ru/moskva/audio_i_video/naushniki_8284433652")
+            .unwrap_err();
+        assert!(avito.contains("на Ozon и в ДНС"), "{avito}");
     }
 }

@@ -37,15 +37,16 @@ pub use market::MarketPrice;
 /// По имени нужна только тестам текстов: остальной код берёт её из находки.
 #[cfg(test)]
 pub use market::PerUnit;
-use memory::Notified;
+use memory::{Notified, PriceNews};
 use schedule::Schedule;
 pub use schedule::{Outcome, Pause, RunStatus};
 pub use trial::TrialStatus;
 use trial::Trials;
 pub use watch::{Goal, Watch};
 
+use crate::format;
 use crate::geo::GeoPoint;
-use crate::marketplace::{OfferSource, SourceError, SourceKind};
+use crate::marketplace::{OfferSource, Product, SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::storage::Storage;
 
@@ -72,6 +73,22 @@ pub enum Alert<'a> {
     /// Слежка, о сбое которой сообщали, снова проверяет площадку.
     Recovered {
         watch: &'a Watch,
+    },
+    /// Первая проверка слежки за товаром: сколько он стоит сейчас и дошла ли цена до цели.
+    PriceStarted {
+        watch: &'a Watch,
+        product: &'a Product,
+    },
+    /// Цена товара дошла до цели. `before` — цена прошлого такого сообщения, если товар с тех пор подешевел ещё.
+    PriceReached {
+        watch: &'a Watch,
+        product: &'a Product,
+        before: Option<u64>,
+    },
+    /// Цена была у цели, а теперь выше её — или товара нет в продаже.
+    PriceRose {
+        watch: &'a Watch,
+        product: &'a Product,
     },
     Test,
 }
@@ -399,12 +416,18 @@ impl Hunter {
         let Some(watch) = self.state().book.get(watch_id).cloned() else {
             return;
         };
-        match self.search(&watch).await {
-            Ok(offers) => {
+        match self.look(&watch).await {
+            Ok(Found::Offers(offers)) => {
                 self.state().schedule.source_answered(watch.source);
                 let assessment = assess(&watch, offers, Local::now());
                 if let Some(checked) = self.record(&watch, &assessment) {
                     self.alert(&watch, checked).await;
+                }
+            }
+            Ok(Found::Product(product)) => {
+                self.state().schedule.source_answered(watch.source);
+                if let Some(checked) = self.record_price(&watch, &product) {
+                    self.alert_price(&watch, &product, checked).await;
                 }
             }
             Err(CheckError::Source(SourceError::Captcha)) => {
@@ -422,20 +445,36 @@ impl Hunter {
 
     /// Пробная проверка паузу площадки не трогает: вы смотрите на окно и сами видите, что просит площадка.
     async fn try_out(&self, number: u64, watch: &Watch) {
-        let status = match self.search(watch).await {
-            Ok(offers) => TrialStatus::Done(assess(watch, offers, Local::now())),
+        let status = match self.look(watch).await {
+            Ok(Found::Offers(offers)) => TrialStatus::Done(assess(watch, offers, Local::now())),
+            Ok(Found::Product(product)) => TrialStatus::Priced(product),
             Err(error) => TrialStatus::Failed(error.reason(watch.source)),
         };
         self.state().trials.finish(number, status);
     }
 
-    async fn search(&self, watch: &Watch) -> Result<Vec<Offer>, CheckError> {
-        let Some(source) = self.sources.get(&watch.source) else {
-            return Err(CheckError::Setup(format!(
-                "{} ещё не подключено — нужна разовая настройка",
-                watch.source.title()
-            )));
-        };
+    /// Слежка за товаром смотрит его страницу, остальные ищут на площадке.
+    async fn look(&self, watch: &Watch) -> Result<Found, CheckError> {
+        let source = self.source(watch.source)?;
+        if watch.target_price().is_some() {
+            let link = watch.link.as_deref().unwrap_or_default();
+            let link = watch.source.parse_product_link(link).map_err(CheckError::Setup)?;
+            return source
+                .product(&link)
+                .await
+                .map(Found::Product)
+                .map_err(CheckError::Source);
+        }
+        self.search(watch, source.as_ref()).await.map(Found::Offers)
+    }
+
+    fn source(&self, kind: SourceKind) -> Result<&Arc<dyn OfferSource>, CheckError> {
+        self.sources
+            .get(&kind)
+            .ok_or_else(|| CheckError::Setup(format!("{} ещё не подключено — нужна разовая настройка", kind.title())))
+    }
+
+    async fn search(&self, watch: &Watch, source: &dyn OfferSource) -> Result<Vec<Offer>, CheckError> {
         let home = self.state().home;
         if watch.radius_km.is_some() && home.is_none() {
             return Err(CheckError::Setup(
@@ -498,6 +537,65 @@ impl Hunter {
             lowest: lowest_before,
             recovered,
         })
+    }
+
+    /// Сверяет цену товара с целью и памятью о сообщённом. `None` — слежку успели изменить или удалить.
+    fn record_price(&self, watch: &Watch, product: &Product) -> Option<PriceChecked> {
+        let target = watch.target_price()?;
+        let mut state = self.state();
+        if !state.book.still_has(watch) {
+            return None;
+        }
+        let price = watch.product_price(product);
+        let first_run = state.notified.is_first_run(watch.id);
+        let before = state.notified.price_at_target(watch.id);
+        let news = state.notified.take_price_news(watch.id, target, price);
+        let recovered = state.notified.failure_reported(watch.id);
+        let now_costs = price.map_or_else(|| "нет в продаже".to_string(), format::rub);
+        state.journal.write(format!(
+            "«{}»: сейчас {now_costs}, цель {}",
+            watch.name,
+            format::rub(target)
+        ));
+        state.schedule.record(watch.id, Local::now(), Outcome::Priced(price));
+        state.save_notified(&self.storage);
+        state.save_checks(&self.storage);
+        Some(PriceChecked {
+            first_run,
+            news,
+            before,
+            recovered,
+        })
+    }
+
+    /// Как и у находок: «запущена» — всегда, дальше — только когда цена дошла до цели или ушла выше.
+    /// Не ушло — память о цене возвращается, и сообщение уйдёт после следующей проверки.
+    async fn alert_price(&self, watch: &Watch, product: &Product, checked: PriceChecked) {
+        if self.notifier.is_none() {
+            return;
+        }
+        let PriceChecked {
+            first_run,
+            news,
+            before,
+            recovered,
+        } = checked;
+        if recovered && (first_run || self.send(watch, Alert::Recovered { watch }).await) {
+            let mut state = self.state();
+            state.notified.report_recovery(watch.id);
+            state.save_notified(&self.storage);
+        }
+        let alert = match news {
+            _ if first_run => Alert::PriceStarted { watch, product },
+            PriceNews::Reached { before } => Alert::PriceReached { watch, product, before },
+            PriceNews::Rose => Alert::PriceRose { watch, product },
+            PriceNews::Quiet => return,
+        };
+        if !self.send(watch, alert).await {
+            let mut state = self.state();
+            state.notified.restore_price_at_target(watch.id, before);
+            state.save_notified(&self.storage);
+        }
     }
 
     /// Запоминает неудачу и сообщает о ней, только если о сбое этой слежки ещё не сообщали. Сообщение не ушло —
@@ -593,6 +691,21 @@ struct Checked {
     recovered: bool,
 }
 
+/// Что сообщить после удачной проверки цены товара.
+struct PriceChecked {
+    first_run: bool,
+    news: PriceNews,
+    /// Цена прошлого сообщения «дошла до цели» — вернуть в память, если уведомление не уйдёт.
+    before: Option<u64>,
+    recovered: bool,
+}
+
+/// Что принесла проверка: выдачу площадки или страницу товара.
+enum Found {
+    Offers(Vec<Offer>),
+    Product(Product),
+}
+
 fn summary(watch: &Watch, assessment: &Assessment, news: usize) -> String {
     match assessment.market {
         Some(market) => format!(
@@ -662,6 +775,7 @@ mod tests {
     #[derive(Default)]
     struct ChangingSource {
         offers: StdMutex<Vec<Offer>>,
+        product_price: StdMutex<Option<u64>>,
         captcha: AtomicBool,
         links: StdMutex<Vec<String>>,
     }
@@ -691,6 +805,18 @@ mod tests {
         async fn search_link(&self, link: &reqwest::Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
             self.links.lock().unwrap().push(link.to_string());
             self.search("", area).await
+        }
+
+        async fn product(&self, link: &reqwest::Url) -> Result<Product, SourceError> {
+            self.links.lock().unwrap().push(link.to_string());
+            if self.captcha.load(Ordering::SeqCst) {
+                return Err(SourceError::Captcha);
+            }
+            Ok(Product {
+                name: "Sony WH-CH520".into(),
+                price: *self.product_price.lock().unwrap(),
+                price_without_card: None,
+            })
         }
     }
 
@@ -722,6 +848,11 @@ mod tests {
                 ),
                 Alert::Failed { .. } => "failed".into(),
                 Alert::Recovered { .. } => "recovered".into(),
+                Alert::PriceStarted { product, .. } => format!("price-started:{:?}", product.price),
+                Alert::PriceReached { product, before, .. } => {
+                    format!("reached:{:?}<-{before:?}", product.price)
+                }
+                Alert::PriceRose { product, .. } => format!("rose:{:?}", product.price),
                 Alert::Test => "test".into(),
             };
             self.alerts.lock().unwrap().push(text);
@@ -912,6 +1043,80 @@ mod tests {
 
         assert_eq!(alerts(&notifier), ["started:0", "new:58000"]);
         assert_eq!(hunter.deals().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn product_watch_reports_start_target_reached_and_risen_without_repeats() {
+        let source = ChangingSource::with(Vec::new());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("product");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(headphones_at(3_500)).unwrap();
+        let costs = |price: Option<u64>| *source.product_price.lock().unwrap() = price;
+
+        costs(Some(3_870));
+        hunter.check(id).await;
+        hunter.check(id).await;
+        costs(Some(3_490));
+        hunter.check(id).await;
+        hunter.check(id).await;
+        costs(Some(3_300));
+        hunter.check(id).await;
+        costs(None);
+        notifier.offline.store(true, Ordering::SeqCst);
+        hunter.check(id).await;
+        notifier.offline.store(false, Ordering::SeqCst);
+        let restarted = hunter_with(&source, &notifier, &storage);
+        restarted.check(id).await;
+        restarted.check(id).await;
+
+        assert_eq!(
+            alerts(&notifier),
+            [
+                "price-started:Some(3870)",
+                "reached:Some(3490)<-None",
+                "reached:Some(3300)<-Some(3490)",
+                "rose:None",
+            ],
+            "«снова дороже» не ушло без сети — ушло после перезапуска, и только один раз"
+        );
+        assert!(matches!(
+            restarted.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Priced(None))
+        ));
+        assert_eq!(
+            source.links.lock().unwrap()[0],
+            "https://www.ozon.ru/product/sony-wh-ch520-895366703/",
+            "метки после ? в ссылке на товар не нужны"
+        );
+        assert!(hunter.deals().is_empty(), "цена товара — не находка с рынком");
+    }
+
+    #[tokio::test]
+    async fn product_trial_shows_the_product_page() {
+        let source = ChangingSource::with(Vec::new());
+        *source.product_price.lock().unwrap() = Some(3_870);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("product-trial");
+        let hunter = hunter_with(&source, &notifier, &storage);
+
+        hunter.try_watch(headphones_at(3_500)).unwrap();
+        hunter.check_pending().await;
+
+        assert!(matches!(hunter.trial(), Some(TrialStatus::Priced(product)) if product.price == Some(3_870)));
+        assert!(alerts(&notifier).is_empty());
+    }
+
+    fn headphones_at(target: u64) -> Watch {
+        Watch {
+            name: "Наушники к зиме".into(),
+            link: Some("https://www.ozon.ru/product/sony-wh-ch520-895366703/?at=share".into()),
+            goal: Goal::TargetPrice {
+                price: target,
+                without_card: false,
+            },
+            ..Watch::new_draft()
+        }
     }
 
     #[tokio::test]

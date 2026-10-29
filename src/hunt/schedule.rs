@@ -41,6 +41,8 @@ pub enum Outcome {
         news: usize,
         hidden_suspicious: usize,
     },
+    /// Слежка за товаром: его цена при проверке; `None` — товара не было в продаже.
+    Priced(Option<u64>),
     Failed(String),
 }
 

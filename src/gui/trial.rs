@@ -2,7 +2,9 @@ use eframe::egui;
 
 use super::deals::card;
 use super::{BAD, GOOD, WARN};
+use crate::format::rub;
 use crate::hunt::{Assessment, Sifted, TrialStatus};
+use crate::marketplace::Product;
 
 const EXAMPLES: usize = 3;
 
@@ -25,6 +27,21 @@ pub(super) fn show(ui: &mut egui::Ui, status: &TrialStatus) {
             ui.colored_label(BAD, format!("Проверка не удалась — {reason}."));
         }
         TrialStatus::Done(assessment) => done(ui, assessment),
+        TrialStatus::Priced(product) => {
+            ui.label(&product.name);
+            ui.colored_label(GOOD, product_price(product));
+            ui.weak("Это пробная проверка: ничего не сохранено и никуда не отправлено.");
+        }
+    }
+}
+
+fn product_price(product: &Product) -> String {
+    match (product.price, product.price_without_card) {
+        (None, _) => "Сейчас товара нет в продаже".to_string(),
+        (Some(price), Some(without_card)) if without_card != price => {
+            format!("Сейчас {} с Ozon Картой, {} без неё", rub(price), rub(without_card))
+        }
+        (Some(price), _) => format!("Сейчас {}", rub(price)),
     }
 }
 

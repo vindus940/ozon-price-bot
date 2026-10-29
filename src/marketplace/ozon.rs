@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::browser::{Browser, Tab};
-use crate::marketplace::{Area, OfferSource, SourceError};
+use crate::marketplace::{Area, OfferSource, Product, SourceError};
 use crate::offer::Offer;
 use crate::wait;
 
@@ -17,6 +17,7 @@ const HOME: &str = "https://www.ozon.ru/";
 /// Скачивание порций выдачи; разбор карточек ему передаётся отдельным скриптом, который тесты проверяют без сети.
 const SCAN_SCRIPT: &str = include_str!("ozon/scan.js");
 const PARSE_SCRIPT: &str = include_str!("ozon/parse.js");
+const PRODUCT_SCRIPT: &str = include_str!("ozon/product.js");
 const READY_TIMEOUT: Duration = Duration::from_mins(1);
 const SCAN_TIMEOUT: Duration = Duration::from_mins(2);
 
@@ -35,6 +36,12 @@ pub struct Ozon {
 struct ScanResult {
     captcha: bool,
     offers: Vec<Offer>,
+}
+
+#[derive(Deserialize)]
+struct ProductResult {
+    captcha: bool,
+    product: Option<Product>,
 }
 
 impl Ozon {
@@ -101,6 +108,26 @@ impl OfferSource for Ozon {
             None => link.path().to_string(),
         };
         self.scan(&self.scan_expression("", Some(&path))?).await
+    }
+
+    async fn product(&self, link: &Url) -> Result<Product, SourceError> {
+        let path = serde_json::to_string(link.path()).context("не удалось подготовить ссылку")?;
+        let expression = format!("({PRODUCT_SCRIPT})({path}, {PARSE_SCRIPT})");
+        let _exclusive = self.tab_in_use.lock().await;
+        let tab = self.ready_tab().await?;
+        let result: ProductResult = timeout(SCAN_TIMEOUT, tab.evaluate(&expression))
+            .await
+            .map_err(|_| anyhow!("Ozon не ответил за {} секунд", SCAN_TIMEOUT.as_secs()))??;
+        match result {
+            ProductResult { captcha: true, .. } => Err(SourceError::Captcha),
+            ProductResult {
+                product: Some(product), ..
+            } => Ok(product),
+            ProductResult { product: None, .. } => Err(anyhow!(
+                "Ozon не показал товар по ссылке — откройте её в браузере: может быть, товар удалён"
+            )
+            .into()),
+        }
     }
 }
 
@@ -181,6 +208,63 @@ mod tests {
             .unwrap_or_else(|error| panic!("parse.js упал: {error}"));
         let json = result.to_string(&mut engine).unwrap().to_std_string_escaped();
         serde_json::from_str(&json).unwrap()
+    }
+
+    const PRODUCT_SAMPLE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ozon-product.json");
+
+    fn parse_product(page: &serde_json::Value) -> Option<Product> {
+        let script = format!(
+            "const parse = {PARSE_SCRIPT};
+             JSON.stringify(parse.productOf(Object.entries(({page}).widgetStates)))"
+        );
+        let mut engine = boa_engine::Context::default();
+        let result = engine
+            .eval(boa_engine::Source::from_bytes(&script))
+            .unwrap_or_else(|error| panic!("parse.js упал: {error}"));
+        serde_json::from_str(&result.to_string(&mut engine).unwrap().to_std_string_escaped()).unwrap()
+    }
+
+    fn product_page(price: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "widgetStates": {
+            "webProductHeading-1-default-1": serde_json::json!({ "title": "Чайник  Xiaomi" }).to_string(),
+            "webPrice-2-default-1": price.to_string(),
+        }})
+    }
+
+    /// Образец — страница наушников 29.10.2026: с Ozon Картой 3 870 ₽ (как на плитке выдачи), без неё — 3 990 ₽.
+    #[test]
+    fn saved_product_page_gives_both_prices() {
+        let page = serde_json::from_str(&std::fs::read_to_string(PRODUCT_SAMPLE_PATH).unwrap()).unwrap();
+        assert_eq!(
+            parse_product(&page),
+            Some(Product {
+                name: "Sony WH-CH520 Наушники накладные беспроводные, черные".into(),
+                price: Some(3_870),
+                price_without_card: Some(3_990),
+            })
+        );
+    }
+
+    #[test]
+    fn product_out_of_stock_has_no_price_and_single_price_is_for_everyone() {
+        let sold_out =
+            product_page(&serde_json::json!({ "isAvailable": false, "cardPrice": "1 990 ₽", "price": "2 090 ₽" }));
+        assert_eq!(parse_product(&sold_out).map(|product| product.price), Some(None));
+
+        let single = product_page(&serde_json::json!({ "isAvailable": true, "price": "2 090 ₽" }));
+        assert_eq!(
+            parse_product(&single),
+            Some(Product {
+                name: "Чайник Xiaomi".into(),
+                price: Some(2_090),
+                price_without_card: None,
+            })
+        );
+        assert_eq!(
+            parse_product(&serde_json::json!({ "widgetStates": {} })),
+            None,
+            "не страница товара"
+        );
     }
 
     fn is_robot_check(html: &str) -> bool {
@@ -303,6 +387,23 @@ mod tests {
             offers[0].price,
             offers[0].name
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1"]
+    async fn reads_product_page_on_live_site() {
+        let ozon = Ozon::new(test_browser(), 1);
+        let link = SourceKind::Ozon
+            .parse_product_link(
+                "https://www.ozon.ru/product/sony-wh-ch520-naushniki-nakladnye-besprovodnye-chernye-895366703/",
+            )
+            .unwrap();
+
+        let product = ozon.product(&link).await.unwrap();
+
+        assert!(product.name.contains("WH-CH520"), "{product:?}");
+        assert!(product.price.is_some(), "пропала цена со страницы товара: {product:?}");
+        println!("{product:?}");
     }
 
     /// Ссылка с фильтрами «бренд Xiaomi» (номер бренда на Ozon) и «доставка завтра»: без фильтров Xiaomi среди

@@ -22,9 +22,59 @@ pub struct Notified {
     /// присылал бы то же «не смогла проверить» снова.
     #[serde(default)]
     failing: HashSet<u64>,
+    /// Слежки за товаром, о которых уже сообщили «цена дошла до цели», — с ценой того сообщения.
+    #[serde(default)]
+    at_target: HashMap<u64, u64>,
+}
+
+/// Что сообщить о цене товара после проверки.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceNews {
+    /// Цена дошла до цели. `before` — цена прошлого такого сообщения, если товар с тех пор заметно подешевел ещё.
+    Reached {
+        before: Option<u64>,
+    },
+    /// Была у цели, а теперь дороже её или товара нет в продаже.
+    Rose,
+    Quiet,
 }
 
 impl Notified {
+    /// Цена товара против цели: о достижении — один раз и снова, только если товар заметно подешевел ещё;
+    /// о том, что цена ушла выше, — один раз. `price: None` — товара нет в продаже.
+    pub fn take_price_news(&mut self, watch_id: u64, target: u64, price: Option<u64>) -> PriceNews {
+        self.mark_started(watch_id);
+        let reached = price.filter(|&price| price <= target);
+        match (reached, self.at_target.get(&watch_id).copied()) {
+            (Some(price), None) => {
+                self.at_target.insert(watch_id, price);
+                PriceNews::Reached { before: None }
+            }
+            (Some(price), Some(before)) if noteworthy_drop(price, before) => {
+                self.at_target.insert(watch_id, price);
+                PriceNews::Reached { before: Some(before) }
+            }
+            (None, Some(_)) => {
+                self.at_target.remove(&watch_id);
+                PriceNews::Rose
+            }
+            _ => PriceNews::Quiet,
+        }
+    }
+
+    /// Цена последнего сообщения «дошла до цели» — чтобы вернуть её, если уведомление не ушло.
+    pub fn price_at_target(&self, watch_id: u64) -> Option<u64> {
+        self.at_target.get(&watch_id).copied()
+    }
+
+    /// Уведомление о цене не ушло — память как до проверки, и при следующей проверке оно уйдёт снова.
+    pub fn restore_price_at_target(&mut self, watch_id: u64, price: Option<u64>) {
+        match price {
+            Some(price) => self.at_target.insert(watch_id, price),
+            None => self.at_target.remove(&watch_id),
+        };
+    }
+
     /// Что из найденного стоит отправить: новое и заметно подешевевшее. Отобранное сразу запоминается,
     /// а слежка считается запущенной, даже если отправлять нечего. У подешевевшего — прошлая цена.
     pub fn take_news(&mut self, watch_id: u64, deals: &[Deal]) -> Vec<Deal> {
@@ -52,10 +102,8 @@ impl Notified {
         if self.dismissed.get(&watch_id).is_some_and(|urls| urls.contains(url)) {
             return false;
         }
-        match self.notified_price(watch_id, url) {
-            None => true,
-            Some(notified_price) => price * 100 <= notified_price * (100 - NOTEWORTHY_DROP_PERCENT),
-        }
+        self.notified_price(watch_id, url)
+            .is_none_or(|notified_price| noteworthy_drop(price, notified_price))
     }
 
     fn notified_price(&self, watch_id: u64, url: &str) -> Option<u64> {
@@ -77,6 +125,7 @@ impl Notified {
     pub fn forget(&mut self, watch_id: u64) {
         self.by_watch.remove(&watch_id);
         self.failing.remove(&watch_id);
+        self.at_target.remove(&watch_id);
     }
 
     pub fn failure_reported(&self, watch_id: u64) -> bool {
@@ -109,9 +158,52 @@ impl Notified {
     }
 }
 
+fn noteworthy_drop(price: u64, before: u64) -> bool {
+    price * 100 <= before * (100 - NOTEWORTHY_DROP_PERCENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_price_is_reported_when_reached_again_only_much_cheaper_and_once_when_it_rises() {
+        let mut notified = Notified::default();
+        let mut check = |price| notified.take_price_news(9, 3_500, price);
+
+        assert_eq!(check(Some(3_870)), PriceNews::Quiet, "ещё дороже цели");
+        assert_eq!(check(Some(3_500)), PriceNews::Reached { before: None });
+        assert_eq!(check(Some(3_450)), PriceNews::Quiet, "подешевело меньше чем на 3%");
+        assert_eq!(check(Some(3_300)), PriceNews::Reached { before: Some(3_500) });
+        assert_eq!(check(Some(3_600)), PriceNews::Rose);
+        assert_eq!(check(Some(3_700)), PriceNews::Quiet, "о подорожании — один раз");
+        assert_eq!(check(Some(3_400)), PriceNews::Reached { before: None });
+        assert_eq!(check(None), PriceNews::Rose, "пропал из продажи");
+    }
+
+    #[test]
+    fn target_price_memory_survives_restart_restores_after_failed_alert_and_resets_on_edit() {
+        let mut notified = Notified::default();
+        notified.take_price_news(9, 3_500, Some(3_400));
+        let mut saved: Notified = serde_json::from_str(&serde_json::to_string(&notified).unwrap()).unwrap();
+        assert_eq!(saved.take_price_news(9, 3_500, Some(3_400)), PriceNews::Quiet);
+
+        let before = saved.price_at_target(9);
+        assert_eq!(saved.take_price_news(9, 3_500, None), PriceNews::Rose);
+        saved.restore_price_at_target(9, before);
+        assert_eq!(
+            saved.take_price_news(9, 3_500, None),
+            PriceNews::Rose,
+            "не ушло — уйдёт снова"
+        );
+
+        saved.take_price_news(9, 3_500, Some(3_400));
+        saved.forget(9);
+        assert_eq!(
+            saved.take_price_news(9, 3_500, Some(3_400)),
+            PriceNews::Reached { before: None }
+        );
+    }
 
     #[test]
     fn new_offer_and_noticeable_drop_are_news() {

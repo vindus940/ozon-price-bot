@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geo::GeoPoint;
 use crate::hunt::category::Category;
-use crate::marketplace::{Area, SourceKind};
+use crate::marketplace::{Area, Product, SourceKind};
 use crate::search::{PriceRange, SearchRequest, ShopConditions, mentions};
 use crate::text::words;
 
@@ -16,6 +16,9 @@ pub enum Goal {
     BelowMarket { min_discount_percent: u8 },
     /// Перепродать: выгода после торга и расходов.
     Resale { min_profit: u64, costs: u64 },
+    /// Дождаться цены одного товара по ссылке на его страницу (в `link`): не дороже `price`. Рынка тут нет —
+    /// это запланированная покупка. `without_card` — сравнивать с ценой без Ozon Карты.
+    TargetPrice { price: u64, without_card: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,11 +87,21 @@ impl Watch {
         if self.name.trim().is_empty() {
             problems.push("Дайте слежке название".to_string());
         }
-        if self.query.trim().is_empty() {
-            problems.push("Напишите, что искать".to_string());
-        }
-        if let Some(Err(problem)) = self.link.as_deref().map(|link| self.source.parse_link(link)) {
-            problems.push(problem);
+        if let Goal::TargetPrice { price, .. } = self.goal {
+            match self.link.as_deref() {
+                None => problems.push("Вставьте ссылку на страницу товара".to_string()),
+                Some(link) => problems.extend(self.source.parse_product_link(link).err()),
+            }
+            if price == 0 {
+                problems.push("Напишите цену, при которой сообщить".to_string());
+            }
+        } else {
+            if self.query.trim().is_empty() {
+                problems.push("Напишите, что искать".to_string());
+            }
+            if let Some(Err(problem)) = self.link.as_deref().map(|link| self.source.parse_link(link)) {
+                problems.push(problem);
+            }
         }
         if let (Some(min), Some(max)) = (self.price.min, self.price.max)
             && min > max
@@ -194,6 +207,23 @@ impl Watch {
         market(self) == market(other)
     }
 
+    /// Цена, до которой ждёт слежка за товаром; у слежек по рынку её нет.
+    pub fn target_price(&self) -> Option<u64> {
+        match self.goal {
+            Goal::TargetPrice { price, .. } => Some(price),
+            Goal::BelowMarket { .. } | Goal::Resale { .. } => None,
+        }
+    }
+
+    /// Цена товара, которую слежка сравнивает с целью: по умолчанию та, что Ozon показывает первой (с Ozon Картой).
+    /// Без карты — цена для всех, а где она одна (ДНС) — она и есть. `None` — товара нет в продаже.
+    pub fn product_price(&self, product: &Product) -> Option<u64> {
+        match self.goal {
+            Goal::TargetPrice { without_card: true, .. } => product.price_without_card.or(product.price),
+            _ => product.price,
+        }
+    }
+
     pub fn is_due(&self, last_run: Option<DateTime<Local>>, now: DateTime<Local>) -> bool {
         self.enabled && last_run.is_none_or(|last| now - last >= Duration::minutes(i64::from(self.every_minutes)))
     }
@@ -263,6 +293,64 @@ mod tests {
             by_link("https://www.avito.ru/moskva?q=iphone").problems(false),
             ["Ссылка должна вести на www.ozon.ru, а эта ведёт на www.avito.ru"]
         );
+    }
+
+    fn product_watch(link: Option<&str>, price: u64) -> Watch {
+        Watch {
+            name: "Наушники к зиме".into(),
+            link: link.map(Into::into),
+            goal: Goal::TargetPrice {
+                price,
+                without_card: false,
+            },
+            ..Watch::new_draft()
+        }
+    }
+
+    #[test]
+    fn product_watch_needs_a_product_link_and_a_price_but_no_query() {
+        let link = "https://www.ozon.ru/product/sony-wh-ch520-895366703/";
+        assert!(product_watch(Some(link), 3_500).problems(false).is_empty());
+        assert_eq!(
+            product_watch(None, 0).problems(false),
+            [
+                "Вставьте ссылку на страницу товара",
+                "Напишите цену, при которой сообщить"
+            ]
+        );
+        let search_link = product_watch(Some("https://www.ozon.ru/search/?text=sony"), 3_500).problems(false);
+        assert!(search_link[0].starts_with("Это ссылка не на товар"), "{search_link:?}");
+    }
+
+    #[test]
+    fn product_price_is_with_ozon_card_unless_asked_without() {
+        let product = Product {
+            name: "Sony WH-CH520".into(),
+            price: Some(3_870),
+            price_without_card: Some(3_990),
+        };
+        let with_card = product_watch(None, 3_500);
+        let without_card = Watch {
+            goal: Goal::TargetPrice {
+                price: 3_500,
+                without_card: true,
+            },
+            ..with_card.clone()
+        };
+        assert_eq!(with_card.product_price(&product), Some(3_870));
+        assert_eq!(without_card.product_price(&product), Some(3_990));
+
+        let one_price = Product {
+            price_without_card: None,
+            ..product.clone()
+        };
+        assert_eq!(without_card.product_price(&one_price), Some(3_870), "у ДНС цена одна");
+        let sold_out = Product {
+            price: None,
+            price_without_card: None,
+            ..product
+        };
+        assert_eq!(without_card.product_price(&sold_out), None);
     }
 
     #[test]

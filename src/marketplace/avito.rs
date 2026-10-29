@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::browser::{Browser, Tab};
 use crate::marketplace::page::{self, PageState, ScriptPage};
-use crate::marketplace::{Area, OfferSource, SourceError};
+use crate::marketplace::{Area, OfferSource, Product, SourceError};
 use crate::offer::Offer;
 use crate::storage::Storage;
 
@@ -156,6 +156,11 @@ impl OfferSource for Avito {
             .into());
         }
         page.into_offers()
+    }
+
+    /// Форма слежки такую ссылку не примет (`SourceKind::has_product_pages`): ответ — на случай, если дойдёт.
+    async fn product(&self, _link: &Url) -> Result<Product, SourceError> {
+        Err(anyhow!("Авито: за ценой одного объявления программа не следит — только за товарами Ozon и ДНС").into())
     }
 }
 

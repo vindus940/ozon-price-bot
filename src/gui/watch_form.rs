@@ -18,6 +18,13 @@ pub(super) enum FormAction {
 enum GoalKind {
     BelowMarket,
     Resale,
+    TargetPrice,
+}
+
+/// Цель слежки за товаром, пока вы её печатаете.
+struct TargetDraft {
+    price: String,
+    without_card: bool,
 }
 
 /// Черновик слежки: числа хранятся текстом, пока вы их печатаете, и проверяются при сохранении.
@@ -39,6 +46,7 @@ pub(super) struct WatchForm {
     min_discount: u8,
     min_profit: u64,
     costs: u64,
+    target: TargetDraft,
     include_suspicious: bool,
     shop: ShopConditions,
     new_only: bool,
@@ -55,6 +63,7 @@ impl WatchForm {
         let (goal, min_discount, min_profit, costs) = match watch.goal {
             Goal::BelowMarket { min_discount_percent } => (GoalKind::BelowMarket, min_discount_percent, 2_000, 500),
             Goal::Resale { min_profit, costs } => (GoalKind::Resale, 20, min_profit, costs),
+            Goal::TargetPrice { .. } => (GoalKind::TargetPrice, 20, 2_000, 500),
         };
         let number = |value: Option<u64>| value.map(|v| v.to_string()).unwrap_or_default();
         Self {
@@ -75,6 +84,10 @@ impl WatchForm {
             min_discount,
             min_profit,
             costs,
+            target: TargetDraft {
+                price: number(watch.target_price()),
+                without_card: matches!(watch.goal, Goal::TargetPrice { without_card: true, .. }),
+            },
             include_suspicious: watch.include_suspicious,
             shop: watch.shop,
             new_only: watch.new_only,
@@ -103,9 +116,14 @@ impl WatchForm {
             .spacing([14.0, 10.0])
             .show(ui, |ui| {
                 self.what_and_where(ui, home_is_set, &is_connected);
-                self.what_we_look_for(ui);
-                self.filters(ui);
-                self.goal_and_schedule(ui);
+                self.goal(ui);
+                if self.goal == GoalKind::TargetPrice {
+                    self.product(ui);
+                } else {
+                    self.what_we_look_for(ui);
+                    self.filters(ui);
+                }
+                self.schedule(ui);
             });
 
         for problem in &self.problems {
@@ -164,7 +182,7 @@ impl WatchForm {
         });
         ui.end_row();
 
-        if self.source.has_locations() {
+        if self.source.has_locations() && self.goal != GoalKind::TargetPrice {
             ui.label("Рядом с домом");
             ui.vertical(|ui| self.radius_choice(ui, home_is_set));
             ui.end_row();
@@ -287,17 +305,48 @@ impl WatchForm {
         ui.end_row();
     }
 
-    fn goal_and_schedule(&mut self, ui: &mut egui::Ui) {
+    fn goal(&mut self, ui: &mut egui::Ui) {
         ui.label("Цель");
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.radio_value(&mut self.goal, GoalKind::BelowMarket, "Купить ниже рынка");
                 ui.radio_value(&mut self.goal, GoalKind::Resale, "Перепродать");
+                ui.radio_value(&mut self.goal, GoalKind::TargetPrice, "Дождаться цены товара");
             });
             self.goal_details(ui);
         });
         ui.end_row();
+    }
 
+    fn product(&mut self, ui: &mut egui::Ui) {
+        ui.label("Ссылка на товар");
+        ui.vertical(|ui| {
+            field(ui, &mut self.link, &format!("https://{}/product/…", self.source.site()));
+            ui.weak("Откройте страницу товара на сайте и скопируйте адрес из строки браузера.");
+            if !self.source.has_product_pages() {
+                ui.colored_label(WARN, "За ценой товара программа следит на Ozon и в ДНС");
+            }
+        });
+        ui.end_row();
+
+        ui.label("Цена, ₽");
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("не дороже");
+                short_field(ui, &mut self.target.price);
+            });
+            if self.source.has_card_price() {
+                ui.checkbox(
+                    &mut self.target.without_card,
+                    "У меня нет Ozon Карты — сравнивать с ценой без неё",
+                );
+                ui.weak("Ozon показывает первой цену с Ozon Картой; в сообщении будут обе.");
+            }
+        });
+        ui.end_row();
+    }
+
+    fn schedule(&mut self, ui: &mut egui::Ui) {
         ui.label("Проверять");
         ui.horizontal(|ui| {
             ui.label("каждые");
@@ -351,6 +400,11 @@ impl WatchForm {
                     );
                 }
             }
+            GoalKind::TargetPrice => {
+                ui.weak(
+                    "Один конкретный товар: напишу, когда цена опустится до вашей, и коротко — если снова поднимется.",
+                );
+            }
         }
     }
 
@@ -363,9 +417,11 @@ impl WatchForm {
         };
         let min_rating = optional(&self.min_rating, "Рейтинг от", &mut problems);
         let min_reviews = optional(&self.min_reviews, "Отзывов от", &mut problems);
+        let target_price = optional(&self.target.price, "Цена не дороже", &mut problems);
         if !problems.is_empty() {
             return Err(problems);
         }
+        let product = self.goal == GoalKind::TargetPrice;
 
         Ok(Watch {
             id: self.id,
@@ -384,7 +440,7 @@ impl WatchForm {
                 .collect(),
             min_rating,
             min_reviews,
-            radius_km: self.radius_km.filter(|_| self.source.has_locations()),
+            radius_km: self.radius_km.filter(|_| self.source.has_locations() && !product),
             goal: match self.goal {
                 GoalKind::BelowMarket => Goal::BelowMarket {
                     min_discount_percent: self.min_discount,
@@ -392,6 +448,10 @@ impl WatchForm {
                 GoalKind::Resale => Goal::Resale {
                     min_profit: self.min_profit,
                     costs: self.costs,
+                },
+                GoalKind::TargetPrice => Goal::TargetPrice {
+                    price: target_price.unwrap_or_default(),
+                    without_card: self.target.without_card && self.source.has_card_price(),
                 },
             },
             include_suspicious: self.include_suspicious,
@@ -470,6 +530,35 @@ mod tests {
             enabled: false,
         };
         assert_eq!(WatchForm::edit(&watch).to_watch(), Ok(watch));
+    }
+
+    #[test]
+    fn product_watch_survives_the_form_and_drops_what_it_does_not_use() {
+        let headphones = Watch {
+            id: 4,
+            name: "Наушники к зиме".into(),
+            link: Some("https://www.ozon.ru/product/sony-wh-ch520-895366703/".into()),
+            goal: Goal::TargetPrice {
+                price: 3_500,
+                without_card: true,
+            },
+            ..Watch::new_draft()
+        };
+        assert_eq!(WatchForm::edit(&headphones).to_watch().as_ref(), Ok(&headphones));
+
+        let mut form = WatchForm::edit(&headphones);
+        form.source = SourceKind::Dns;
+        form.radius_km = Some(5);
+        let at_dns = form.to_watch().unwrap();
+        assert_eq!(
+            at_dns.goal,
+            Goal::TargetPrice {
+                price: 3_500,
+                without_card: false
+            },
+            "у ДНС цена одна — галочка Ozon Карты не нужна"
+        );
+        assert_eq!(at_dns.radius_km, None, "товар по ссылке ищется не рядом с домом");
     }
 
     #[test]

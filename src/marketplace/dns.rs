@@ -10,11 +10,14 @@ use tokio::sync::Mutex;
 
 use crate::browser::{Browser, Tab};
 use crate::marketplace::page::{self, PageState, ScriptPage};
-use crate::marketplace::{Area, OfferSource, SourceError};
+use crate::marketplace::{Area, OfferSource, Product, SourceError};
 use crate::offer::Offer;
 
 const HOME: &str = "https://www.dns-shop.ru/";
 const READ_SCRIPT: &str = include_str!("dns/read.js");
+const PRODUCT_SCRIPT: &str = include_str!("dns/product.js");
+const PRODUCT_NOT_FOUND: &str =
+    "ДНС не нашёл такой товар — откройте ссылку в браузере: может быть, его сняли с продажи";
 const NOT_FOUND: &str = "ДНС открыл не выдачу, а страницу бренда — уточните запрос: не «makita», а «шуруповерт makita»";
 /// Страница ДНС — 24 товара, для рынка мало. Три страницы — 72, а переходов на сайт за проверку всего три.
 const PAGES: u32 = 3;
@@ -80,6 +83,16 @@ impl OfferSource for Dns {
         let _exclusive = self.tab_in_use.lock().await;
         let tab = self.browser.tab(HOME).await?;
         read_pages(&tab, link.as_str()).await
+    }
+
+    async fn product(&self, link: &Url) -> Result<Product, SourceError> {
+        let _exclusive = self.tab_in_use.lock().await;
+        let tab = self.browser.tab(HOME).await?;
+        let page: ProductPage = page::open(&tab, link.as_str(), PRODUCT_SCRIPT, PRODUCT_NOT_FOUND).await?;
+        if let Some(city) = &page.city {
+            log::info!("ДНС: {link}, город на сайте — {city}");
+        }
+        Ok(page.into_product())
     }
 }
 
@@ -147,6 +160,38 @@ impl ScriptPage for Page {
 
     fn state(&self) -> &PageState {
         &self.state
+    }
+}
+
+/// Страница одного товара, прочитанная `dns/product.js`.
+#[derive(Deserialize)]
+struct ProductPage {
+    stale: bool,
+    state: PageState,
+    name: String,
+    price: Option<u64>,
+    in_stock: bool,
+    city: Option<String>,
+}
+
+impl ScriptPage for ProductPage {
+    fn stale(&self) -> bool {
+        self.stale
+    }
+
+    fn state(&self) -> &PageState {
+        &self.state
+    }
+}
+
+impl ProductPage {
+    /// Не в наличии — цены нет, даже если ДНС её пишет: купить по ней всё равно нельзя.
+    fn into_product(self) -> Product {
+        Product {
+            name: self.name,
+            price: self.price.filter(|_| self.in_stock),
+            price_without_card: None,
+        }
     }
 }
 
@@ -345,6 +390,22 @@ mod tests {
             matches!(broken, Err(SourceError::Failed(error)) if error.to_string().contains("поменял устройство карточек"))
         );
     }
+
+    /// Так `dns/product.js` отдаёт страницу наушников 29.10.2026 — из описания товара schema.org.
+    #[test]
+    fn product_page_has_price_only_when_in_stock() {
+        let read = |in_stock| -> Product {
+            serde_json::from_value::<ProductPage>(serde_json::json!({
+                "stale": false, "state": "listings", "city": "Москва", "in_stock": in_stock,
+                "name": "Беспроводные наушники Sony WH-CH520 черный 2023", "price": 4299
+            }))
+            .unwrap()
+            .into_product()
+        };
+        assert_eq!(read(true).price, Some(4_299));
+        assert_eq!(read(false).price, None);
+        assert_eq!(read(true).price_without_card, None, "цен с картой и без у ДНС нет");
+    }
 }
 
 #[cfg(test)]
@@ -379,6 +440,23 @@ mod live {
             offers[0].name,
             offers[0].delivery
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой ДНС: cargo test -- --ignored --test-threads=1"]
+    async fn reads_product_page_on_live_site() {
+        let dns = Dns::new(test_browser());
+        let link = crate::marketplace::SourceKind::Dns
+            .parse_product_link(
+                "https://www.dns-shop.ru/product/94161cf40137d9cb/besprovodnye-nausniki-sony-wh-ch520-cernyj-2023/",
+            )
+            .unwrap();
+
+        let product = dns.product(&link).await.unwrap();
+
+        assert!(product.name.contains("WH-CH520"), "{product:?}");
+        assert!(product.price.is_some(), "пропала цена из описания товара: {product:?}");
+        println!("{product:?}");
     }
 
     /// Подборка «наушники Sony» — в неё ДНС сам переводит такой поиск; бренд в ней — часть пути.

@@ -6,7 +6,7 @@ use reqwest::Url;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
-use crate::marketplace::{Area, OfferSource, SourceError};
+use crate::marketplace::{Area, OfferSource, Product, SourceError};
 use crate::offer::Offer;
 
 /// Площадка с паузой между поисками. Пауза общая для всех, кто ищет на площадке, — слежек, бота и самопроверки:
@@ -51,6 +51,11 @@ impl OfferSource for Throttled {
     async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
         self.wait_turn().await;
         self.inner.search_link(link, area).await
+    }
+
+    async fn product(&self, link: &Url) -> Result<Product, SourceError> {
+        self.wait_turn().await;
+        self.inner.product(link).await
     }
 }
 

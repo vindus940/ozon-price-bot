@@ -1,0 +1,6 @@
+{
+   "widgetStates" : {
+      "webPrice-3121879-default-1" : "{\"cardPrice\":\"3 870 ₽\",\"isAvailable\":true,\"lexemes\":{\"currency\":\"Валюта\",\"includeVatTextMobile\":\"Цена с НДС\",\"moreText\":\"Подробнее\",\"notRefundVatText\":\"НДС не возмещается\",\"withOzonCard\":\"С банками\",\"withoutOzonCard\":\"С другими банками\",\"withoutVatText\":\"без НДС\",\"withoutVatTextCapitalize\":\"Без НДС\",\"withoutVatTextMobile\":\"Цена без НДС\"},\"link\":\"/modal/pdpListOfBanks?product_id=895366703\",\"originalPrice\":\"7 990 ₽\",\"params\":{\"ladderPriceHide\":false,\"showPpu\":true,\"withOzonAccount\":\"/modal/withOzonAccount\",\"withOzonAccountLegal\":\"/modal/OzoneAccountForLegal\",\"withoutOzonAccount\":\"/modal/withoutOzonAccount\"},\"price\":\"3 990 ₽\",\"showOriginalPrice\":true}",
+      "webProductHeading-3385933-default-1" : "{\"lexemes\":{\"showMore\":\"ещё\"},\"params\":{\"rowsCount\":3},\"rowCount\":3,\"title\":\"Sony WH-CH520 Наушники накладные беспроводные, черные\"}"
+   }
+}
