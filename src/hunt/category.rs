@@ -89,7 +89,8 @@ impl Category {
     pub fn hint(self) -> &'static str {
         match self {
             Category::Electronics => {
-                "Не сравнивает с чехлами, стёклами, кабелями и с другими версиями модели (Pro, Max, Plus, Mini…)"
+                "Не сравнивает с чехлами, стёклами, кабелями, геймпадами, комплектами «+ игра» и с другими версиями \
+                 модели (Pro, Max, Plus, Mini…)"
             }
             Category::Appliances => {
                 "Не сравнивает с фильтрами, мешками, насадками, другими расходниками и с другими версиями модели \
@@ -133,6 +134,9 @@ impl Category {
                 "наклейк",
                 "аксессуар",
                 "аккумулятор для",
+                "геймпад",
+                "джойстик",
+                "кронштейн",
             ],
             Category::Appliances => &[
                 "фильтр для",
@@ -205,8 +209,31 @@ impl Category {
             .iter()
             .any(|variant| title_words.iter().any(|w| w == variant) && !query_words.iter().any(|w| w == variant));
 
-        !foreign_phrase && !foreign_variant && !made_for(query, &title_words)
+        let foreign_set = self == Category::Electronics
+            && (is_bundle(&query_words, title)
+                || GAMES
+                    .iter()
+                    .any(|game| title_words.iter().any(|w| w == game) && !query_words.iter().any(|w| w == game)));
+
+        !foreign_phrase && !foreign_variant && !foreign_set && !made_for(query, &title_words)
     }
+}
+
+/// «Игра» в названии электроники, которую ищут без неё: приставка с игрой или «150 игр» — перепрошитая.
+/// Целыми словами: «Игровая приставка» — сама приставка.
+const GAMES: &[&str] = &["игра", "игры", "игр", "игрой", "играми"];
+
+/// Объём памяти через плюс — характеристика, а не комплект: «Xbox Series X 16 ГБ + 1 ТБ» (в «ТБ» у Ozon бывает
+/// латинская T).
+static CAPACITY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*\d+\s*[gгtт][bб]").unwrap());
+
+/// Комплект «приставка + 2й геймпад + игра»: после плюса — то, чего в запросе нет. Цена у него своя и в рынок
+/// самой вещи не входит (у PS5 Slim комплекты стоили ~117 000 ₽ против ~65 000 ₽ за приставку, Ozon, 23.10).
+fn is_bundle(query_words: &[String], title: &str) -> bool {
+    title
+        .split('+')
+        .skip(1)
+        .any(|extra| !CAPACITY.is_match(extra) && words(extra).iter().any(|word| !query_words.contains(word)))
 }
 
 /// «Руль … (для Xbox Series X/S)», «Аккумулятор … для GOPRO HERO 13»: искомое названо сразу после «для» —
@@ -264,6 +291,59 @@ mod tests {
             "Робот-пылесос Roborock S8 Pro Ultra, белый",
         ] {
             assert!(!appliances.is_comparable("roborock s8", title), "{title}");
+        }
+    }
+
+    /// Настоящие названия выдачи Ozon 29.10.2026: комплекты и перепрошитые приставки стоят иначе, чем сама приставка.
+    #[test]
+    fn console_bundles_preloaded_games_and_gamepads_are_not_the_console() {
+        let electronics = Category::Electronics;
+        for (query, title) in [
+            (
+                "playstation 5 slim",
+                "Игровая приставка Sony PS5 Slim + 2й геймпад камуфляж + игра Spider Man Morales + зарядная станция",
+            ),
+            (
+                "playstation 5 slim",
+                "Игровая приставка PlayStation 5 Slim Disk + Gran Turismo 7+ Dualsense Charging Station+DualSense PS5 White",
+            ),
+            (
+                "nintendo switch 2",
+                "Игровая приставка Nintendo Switch 2 + Mario Kart World",
+            ),
+            (
+                "nintendo switch 2",
+                "Nintendo Switch 2, 150 игр, 1 год гарантии, российская вилка",
+            ),
+            (
+                "steam deck",
+                "Steam Deck OLED 1ТБ, 60 игр, 1 год гарантии, российская вилка",
+            ),
+            ("xbox series x", "Геймпад Microsoft Xbox Series S/X, Carbon Black"),
+            (
+                "xbox series x",
+                "Кронштейн настенный для Microsoft Xbox Series X, HOOK Series X",
+            ),
+        ] {
+            assert!(!electronics.is_comparable(query, title), "{title}");
+        }
+        for (query, title) in [
+            (
+                "xbox series x",
+                "Игровая приставка Microsoft Xbox Series X 16 ГБ + 1 TБ, цифровая версия",
+            ),
+            (
+                "steam deck",
+                "Портативная игровая консоль Valve Steam Deck OLED 16 ГБ + 512 ГБ, 7.4 -дюймовый OLED экран",
+            ),
+            (
+                "playstation 5 slim",
+                "Игровая приставка Sony PlayStation 5 Slim 1TB Digital Edition",
+            ),
+            ("galaxy s24+", "Samsung Galaxy S24+ 256GB"),
+            ("геймпад xbox", "Геймпад Microsoft Xbox Series S/X, Carbon Black"),
+        ] {
+            assert!(electronics.is_comparable(query, title), "{title}");
         }
     }
 
