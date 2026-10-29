@@ -151,6 +151,31 @@ impl SourceKind {
         link.set_fragment(None);
         Ok(link)
     }
+
+    /// Выдача от дешёвых к дорогим в коридоре цен `from..=to` — по запросу или поверх ссылки слежки с её фильтрами.
+    /// Ozon понимает `sorting=price` и `currency_price=3000.000;5000.000` (без «.000» граница молча не применяется,
+    /// 29.10.2026); листалка оба параметра сохраняет. Без нижней границы первыми идут чехлы за 100 ₽.
+    /// `None` — площадка так не умеет (у Авито и ДНС сортировку по цене не проверяли).
+    pub fn cheapest_first(self, query: &str, link: Option<&Url>, from: u64, to: u64) -> Option<Url> {
+        if self != SourceKind::Ozon {
+            return None;
+        }
+        let mut url = match link {
+            Some(link) => link.clone(),
+            None => Url::parse_with_params(&format!("https://{}/search/", self.site()), [("text", query)]).ok()?,
+        };
+        let kept: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| !matches!(key.as_ref(), "sorting" | "currency_price" | "page"))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(&kept)
+            .append_pair("sorting", "price")
+            .append_pair("currency_price", &format!("{from}.000;{to}.000"));
+        Some(url)
+    }
 }
 
 /// Товар со своей страницы. `price` — цена, которую площадка показывает первой (у Ozon — с Ozon Картой);
@@ -292,6 +317,32 @@ mod tests {
             "без https:// — не адрес"
         );
         assert!(SourceKind::Ozon.parse_link("https://www.ozon.ru.example.com/").is_err());
+    }
+
+    #[test]
+    fn cheapest_first_sorts_by_price_within_the_corridor_and_keeps_link_filters() {
+        let by_query = SourceKind::Ozon
+            .cheapest_first("наушники sony", None, 2_200, 3_500)
+            .unwrap();
+        assert_eq!(
+            by_query.as_str(),
+            "https://www.ozon.ru/search/?text=%D0%BD%D0%B0%D1%83%D1%88%D0%BD%D0%B8%D0%BA%D0%B8+sony\
+             &sorting=price&currency_price=2200.000%3B3500.000"
+        );
+
+        let link = SourceKind::Ozon
+            .parse_link("https://www.ozon.ru/category/audiotehnika-15543/?brand=32686750&sorting=rating&page=3")
+            .unwrap();
+        let by_link = SourceKind::Ozon
+            .cheapest_first("наушники", Some(&link), 1_000, 2_000)
+            .unwrap();
+        assert_eq!(
+            by_link.as_str(),
+            "https://www.ozon.ru/category/audiotehnika-15543/?brand=32686750&sorting=price&currency_price=1000.000%3B2000.000",
+            "свой порядок и страница ссылки заменяются, фильтр бренда остаётся"
+        );
+
+        assert!(SourceKind::Dns.cheapest_first("наушники", None, 1_000, 2_000).is_none());
     }
 
     #[test]

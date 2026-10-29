@@ -423,9 +423,9 @@ impl Hunter {
             return;
         };
         match self.look(&watch).await {
-            Ok(Found::Offers(offers)) => {
+            Ok(Found::Offers { offers, cheapest }) => {
                 self.state().schedule.source_answered(watch.source);
-                let assessment = assess(&watch, offers, Local::now());
+                let assessment = assess(&watch, offers, cheapest, Local::now());
                 if let Some(checked) = self.record(&watch, &assessment) {
                     self.alert(&watch, checked).await;
                 }
@@ -452,7 +452,7 @@ impl Hunter {
     /// Пробная проверка паузу площадки не трогает: вы смотрите на окно и сами видите, что просит площадка.
     async fn try_out(&self, number: u64, watch: &Watch) {
         let status = match self.look(watch).await {
-            Ok(Found::Offers(offers)) => TrialStatus::Done(assess(watch, offers, Local::now())),
+            Ok(Found::Offers { offers, cheapest }) => TrialStatus::Done(assess(watch, offers, cheapest, Local::now())),
             Ok(Found::Product(product)) => TrialStatus::Priced(product),
             Err(error) => TrialStatus::Failed(error.reason(watch.source)),
         };
@@ -471,7 +471,40 @@ impl Hunter {
                 .map(Found::Product)
                 .map_err(CheckError::Source);
         }
-        self.search(watch, source.as_ref()).await.map(Found::Offers)
+        let offers = self.search(watch, source.as_ref()).await?;
+        let cheapest = self.cheapest(watch, source.as_ref(), &offers).await;
+        Ok(Found::Offers { offers, cheapest })
+    }
+
+    /// Вторая выдача — от дешёвых к дорогим в коридоре цен вокруг рынка (2.7): самое дешёвое бывает далеко от начала
+    /// популярной выдачи. Не пришла — проверка идёт по обычной выдаче, а причина пишется в журнал: рынок и находки
+    /// из популярного уже есть.
+    async fn cheapest(&self, watch: &Watch, source: &dyn OfferSource, offers: &[Offer]) -> Vec<Offer> {
+        let Some(MarketPrice::Whole(market)) = assess(watch, offers.to_vec(), Vec::new(), Local::now()).market else {
+            return Vec::new();
+        };
+        let Some((from, to)) = watch.cheapest_range(market) else {
+            return Vec::new();
+        };
+        let link = watch
+            .link
+            .as_deref()
+            .and_then(|link| watch.source.parse_link(link).ok());
+        let Some(url) = watch.source.cheapest_first(&watch.query, link.as_ref(), from, to) else {
+            return Vec::new();
+        };
+        let area = watch.search_area(self.state().home);
+        match source.search_link(&url, area).await {
+            Ok(found) => found,
+            Err(error) => {
+                self.state().journal.write(format!(
+                    "«{}»: выдача от дешёвых не пришла, проверено по обычной — {}",
+                    watch.name,
+                    failure_reason(watch.source.title(), &error)
+                ));
+                Vec::new()
+            }
+        }
     }
 
     fn source(&self, kind: SourceKind) -> Result<&Arc<dyn OfferSource>, CheckError> {
@@ -718,9 +751,9 @@ struct PriceChecked {
     recovered: bool,
 }
 
-/// Что принесла проверка: выдачу площадки или страницу товара.
+/// Что принесла проверка: выдачу площадки (и выдачу от дешёвых в коридоре цен, если она была) или страницу товара.
 enum Found {
-    Offers(Vec<Offer>),
+    Offers { offers: Vec<Offer>, cheapest: Vec<Offer> },
     Product(Product),
 }
 
@@ -790,12 +823,16 @@ mod tests {
     use crate::offer::Offer;
     use crate::search::PriceRange;
 
+    /// Выдача от дешёвых (ссылка с `sorting=price`) — свой список и свой учёт ссылок, чтобы тесты обычной выдачи
+    /// её не замечали.
     #[derive(Default)]
     struct ChangingSource {
         offers: StdMutex<Vec<Offer>>,
+        cheapest: StdMutex<Vec<Offer>>,
         product_price: StdMutex<Option<u64>>,
         captcha: AtomicBool,
         links: StdMutex<Vec<String>>,
+        cheapest_links: StdMutex<Vec<String>>,
     }
 
     impl ChangingSource {
@@ -821,6 +858,10 @@ mod tests {
         }
 
         async fn search_link(&self, link: &reqwest::Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+            if link.as_str().contains("sorting=price") {
+                self.cheapest_links.lock().unwrap().push(link.to_string());
+                return Ok(self.cheapest.lock().unwrap().clone());
+            }
             self.links.lock().unwrap().push(link.to_string());
             self.search("", area).await
         }
@@ -1117,6 +1158,33 @@ mod tests {
             [(MarketPrice::Whole(3_300), MarketPrice::Whole(3_300))],
             "точка в час: последняя цена, «нет в продаже» историю не трогает"
         );
+    }
+
+    #[tokio::test]
+    async fn cheapest_offers_beyond_the_popular_ones_become_deals() {
+        let source = ChangingSource::with(market_offers());
+        *source.cheapest.lock().unwrap() = vec![phone(58_000)];
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("cheapest");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let id = hunter.save_watch(iphone_watch()).unwrap();
+
+        hunter.check(id).await;
+
+        assert_eq!(
+            *source.cheapest_links.lock().unwrap(),
+            ["https://www.ozon.ru/search/?text=iphone+15+128&sorting=price&currency_price=36250.000%3B61625.000"],
+            "от половины рынка 72 500 ₽ до рынка минус 15%"
+        );
+        assert_eq!(alerts(&notifier), ["started:1"]);
+        assert_eq!(hunter.deals()[0].offer.price, 58_000);
+        assert!(matches!(
+            hunter.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Checked {
+                market: Some(MarketPrice::Whole(72_500)),
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

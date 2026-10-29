@@ -257,6 +257,21 @@ impl Watch {
         market(self) == market(other)
     }
 
+    /// Где искать выгодное глубже популярного: от половины рынка (дешевле — подделка или обман, ниже идут уже чехлы
+    /// и мелочь) до рынка минус нужная скидка, в пределах вашей цены «от–до». Только для «ниже рынка»: у расходников
+    /// рынок — за килограмм, коридор в рублях за пачку ничего не значит, а перепродажа ищется рядом с домом на Авито.
+    pub fn cheapest_range(&self, market: u64) -> Option<(u64, u64)> {
+        let Goal::BelowMarket { min_discount_percent } = self.goal else {
+            return None;
+        };
+        if self.category.compares_per_unit() {
+            return None;
+        }
+        let from = (market / 2).max(self.price.min.unwrap_or(0));
+        let to = (market * (100 - u64::from(min_discount_percent)) / 100).min(self.price.max.unwrap_or(u64::MAX));
+        (from > 0 && from <= to).then_some((from, to))
+    }
+
     /// Цена, до которой ждёт слежка за товаром; у слежек по рынку её нет.
     pub fn target_price(&self) -> Option<u64> {
         match self.goal {
@@ -572,6 +587,45 @@ mod tests {
             drill_for_resale().same_market(&farther),
             "а вокруг дома — всегда в самом большом радиусе"
         );
+    }
+
+    #[test]
+    fn cheapest_range_is_from_half_the_market_to_the_wanted_discount_within_own_prices() {
+        let headphones = Watch {
+            goal: Goal::BelowMarket {
+                min_discount_percent: 20,
+            },
+            ..watch()
+        };
+        assert_eq!(headphones.cheapest_range(4_400), Some((2_200, 3_520)));
+
+        let up_to_3000 = Watch {
+            price: PriceRange {
+                min: Some(2_500),
+                max: Some(3_000),
+            },
+            ..headphones.clone()
+        };
+        assert_eq!(up_to_3000.cheapest_range(4_400), Some((2_500, 3_000)));
+        let too_cheap = Watch {
+            price: PriceRange {
+                min: None,
+                max: Some(2_000),
+            },
+            ..headphones.clone()
+        };
+        assert_eq!(
+            too_cheap.cheapest_range(4_400),
+            None,
+            "всё, что дешевле 2 000, — подозрительно"
+        );
+
+        let powder = Watch {
+            category: Category::Consumables,
+            ..headphones
+        };
+        assert_eq!(powder.cheapest_range(1_000), None, "у расходников рынок за килограмм");
+        assert_eq!(drill_for_resale().cheapest_range(10_000), None);
     }
 
     #[test]

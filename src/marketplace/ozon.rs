@@ -400,6 +400,32 @@ mod tests {
         );
     }
 
+    /// Ozon фильтрует коридор по цене без Ozon Карты, а плитка показывает цену с картой — поэтому нижняя граница
+    /// с запасом: 3 000 ₽ без карты бывают 2 948 ₽ с картой (29.10.2026).
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1"]
+    async fn finds_cheapest_first_within_the_price_corridor_on_live_site() {
+        let ozon = Ozon::new(test_browser(), 2);
+        let link = SourceKind::Ozon
+            .cheapest_first("наушники sony", None, 3_000, 5_000)
+            .unwrap();
+
+        let offers = ozon.search_link(&link, None).await.unwrap();
+
+        assert!(offers.len() > 8, "собрано всего {}", offers.len());
+        let outside: Vec<u64> = offers
+            .iter()
+            .map(|offer| offer.price)
+            .filter(|price| !(2_500..=5_000).contains(price))
+            .collect();
+        assert!(outside.is_empty(), "коридор цен потерялся: {outside:?}");
+        println!(
+            "собрано {}, первые цены: {:?}",
+            offers.len(),
+            offers.iter().take(8).map(|offer| offer.price).collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1"]
     async fn reads_product_page_on_live_site() {

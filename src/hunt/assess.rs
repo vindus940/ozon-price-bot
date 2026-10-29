@@ -60,25 +60,18 @@ impl Assessment {
 
 /// Рынок считается по всем похожим предложениям, а выгодные выбираются только из тех,
 /// что проходят ваши фильтры: иначе фильтр «до 60 000 ₽» занижал бы и саму рыночную цену.
-pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assessment {
-    let scanned = offers.len();
+/// `cheapest` — выдача от дешёвых к дорогим в коридоре цен (`Watch::cheapest_range`): она добавляет кандидатов,
+/// но в рынок не входит — иначе рынок съехал бы к самым дешёвым.
+pub fn assess(watch: &Watch, offers: Vec<Offer>, cheapest: Vec<Offer>, now: DateTime<Local>) -> Assessment {
+    let popular: HashSet<String> = offers.iter().map(|offer| offer.url.clone()).collect();
+    let cheapest: Vec<Offer> = cheapest
+        .into_iter()
+        .filter(|offer| !popular.contains(&offer.url))
+        .collect();
+    let scanned = offers.len() + cheapest.len();
     let mut sifted = Sifted::default();
-    let similar = OfferFilter::new(&watch.comparables_request());
-    let mut same_product = Vec::new();
-    for offer in offers {
-        if !similar.accepts(&offer) {
-            sifted.other_words += 1;
-        } else if !watch.category.accepts(&watch.query, &offer) {
-            sifted.other_product += 1;
-        } else if watch.new_only && looks_used(&offer) {
-            sifted.used += 1;
-        } else {
-            same_product.push(offer);
-        }
-    }
-    let before_copies = same_product.len();
-    let comparables = without_copies(same_product.into_iter());
-    sifted.copies = before_copies - comparables.len();
+    let comparables = same_product(watch, offers, &mut sifted);
+    let deeper = same_product(watch, cheapest, &mut sifted);
 
     let Some(pricing) = Pricing::for_offers(watch.category, &comparables) else {
         sifted.no_unit_price = comparables.len();
@@ -104,9 +97,17 @@ pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assess
         .filter(|&price| !suspiciously_cheap(market.median, price))
         .min();
 
+    let deeper = deeper.into_iter().filter(|offer| {
+        let has_price = pricing.comparable_price(offer).is_some();
+        if !has_price {
+            sifted.no_unit_price += 1;
+        }
+        has_price
+    });
+
     let wanted = OfferFilter::new(&watch.candidates_request());
     let mut deals = Vec::new();
-    for offer in comparables {
+    for offer in comparables.into_iter().chain(deeper) {
         if !wanted.accepts(&offer) {
             sifted.filters += 1;
             continue;
@@ -152,6 +153,27 @@ pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assess
         hidden_suspicious: suspicious.len(),
         sifted,
     }
+}
+
+/// Тот же товар, что ищет слежка: слова запроса, категория, «только новые», без повторов одного объявления.
+fn same_product(watch: &Watch, offers: Vec<Offer>, sifted: &mut Sifted) -> Vec<Offer> {
+    let similar = OfferFilter::new(&watch.comparables_request());
+    let mut same = Vec::new();
+    for offer in offers {
+        if !similar.accepts(&offer) {
+            sifted.other_words += 1;
+        } else if !watch.category.accepts(&watch.query, &offer) {
+            sifted.other_product += 1;
+        } else if watch.new_only && looks_used(&offer) {
+            sifted.used += 1;
+        } else {
+            same.push(offer);
+        }
+    }
+    let before_copies = same.len();
+    let unique = without_copies(same.into_iter());
+    sifted.copies += before_copies - unique.len();
+    unique
 }
 
 /// Перекупщики выкладывают один товар пачкой одинаковых объявлений — та же цена, то же место.
@@ -200,7 +222,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&new_only, offers, Local::now());
+        let assessment = assess(&new_only, offers, Vec::new(), Local::now());
 
         assert_eq!(assessment.comparable, 6, "б/у не участвуют в рынке новых");
         assert_eq!(assessment.sifted.used, 2);
@@ -223,7 +245,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&picky, offers, Local::now());
+        let assessment = assess(&picky, offers, Vec::new(), Local::now());
 
         assert_eq!(assessment.scanned, 9);
         assert_eq!(assessment.comparable, 7);
@@ -249,7 +271,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&ozon_only, offers, Local::now());
+        let assessment = assess(&ozon_only, offers, Vec::new(), Local::now());
 
         assert_eq!(assessment.comparable, 8, "в рынке и сторонний продавец за 55 000 ₽");
         assert_eq!(assessment.market, Some(MarketPrice::Whole(71_500)));
@@ -265,7 +287,7 @@ mod tests {
         offers.push(phone(20_000));
         offers.push(phone(58_000));
 
-        let cautious = assess(&iphone_watch(), offers.clone(), Local::now());
+        let cautious = assess(&iphone_watch(), offers.clone(), Vec::new(), Local::now());
         assert_eq!(
             cautious.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
             [58_000]
@@ -281,7 +303,7 @@ mod tests {
             include_suspicious: true,
             ..iphone_watch()
         };
-        let all = assess(&curious, offers, Local::now());
+        let all = assess(&curious, offers, Vec::new(), Local::now());
         assert_eq!(
             all.suitable.iter().map(|d| d.offer.price).collect::<Vec<_>>(),
             [20_000, 58_000]
@@ -315,7 +337,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&nearby, offers, Local::now());
+        let assessment = assess(&nearby, offers, Vec::new(), Local::now());
 
         assert_eq!(assessment.market, Some(MarketPrice::Whole(5_000)));
         assert_eq!(
@@ -349,7 +371,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&nearby, offers, Local::now());
+        let assessment = assess(&nearby, offers, Vec::new(), Local::now());
 
         assert_eq!(assessment.comparable, 5);
         assert_eq!(assessment.sifted.copies, 3);
@@ -358,9 +380,40 @@ mod tests {
     }
 
     #[test]
+    fn cheapest_offers_add_deals_but_not_the_market() {
+        let deeper = vec![
+            phone(58_000),
+            phone(70_000),
+            Offer {
+                url: "https://example.com/case-cheap".into(),
+                ..Offer::sample("Чехол для iPhone 15 128GB", 40_000)
+            },
+        ];
+
+        let assessment = assess(&iphone_watch(), market_offers(), deeper, Local::now());
+
+        assert_eq!(
+            assessment.market,
+            Some(MarketPrice::Whole(72_500)),
+            "рынок — только по обычной выдаче"
+        );
+        assert_eq!(assessment.comparable, 6);
+        assert_eq!(
+            assessment
+                .suitable
+                .iter()
+                .map(|deal| deal.offer.price)
+                .collect::<Vec<_>>(),
+            [58_000],
+            "дешёвый айфон из второй выдачи стал находкой, чехол — нет"
+        );
+        assert_eq!(assessment.scanned, 10, "повтор из обычной выдачи не считается дважды");
+    }
+
+    #[test]
     fn too_few_similar_offers_give_no_deals() {
         let offers = [70_000, 50_000, 72_000].map(phone).to_vec();
-        let assessment = assess(&iphone_watch(), offers, Local::now());
+        let assessment = assess(&iphone_watch(), offers, Vec::new(), Local::now());
         assert!(assessment.market.is_none());
         assert!(assessment.suitable.is_empty());
     }
@@ -390,7 +443,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&powder, offers, Local::now());
+        let assessment = assess(&powder, offers, Vec::new(), Local::now());
 
         assert_eq!(
             assessment.comparable, 6,
@@ -416,7 +469,7 @@ mod tests {
             category: Category::Consumables,
             ..iphone_watch()
         };
-        let assessment = assess(&sponges, offers, Local::now());
+        let assessment = assess(&sponges, offers, Vec::new(), Local::now());
         assert_eq!(assessment.comparable, 0);
         assert_eq!(assessment.sifted.no_unit_price, 6);
         assert!(assessment.market.is_none());
@@ -444,7 +497,7 @@ mod tests {
             ..iphone_watch()
         };
 
-        let assessment = assess(&picky, offers, Local::now());
+        let assessment = assess(&picky, offers, Vec::new(), Local::now());
 
         assert_eq!(
             assessment.sifted,
