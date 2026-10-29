@@ -25,6 +25,18 @@ struct Captchas {
     pause: Pause,
 }
 
+/// Как дела у слежек одной площадки — для `/status`: сколько их, когда площадка последний раз ответила
+/// и что пошло не так после этого.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceReport {
+    pub watches: usize,
+    pub enabled: usize,
+    pub last_success: Option<DateTime<Local>>,
+    /// Неудачная проверка позже последней удачной: время и причина.
+    pub failure_since: Option<(DateTime<Local>, String)>,
+    pub pause: Option<Pause>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunStatus {
     pub at: DateTime<Local>,
@@ -137,6 +149,32 @@ impl Schedule {
         }
     }
 
+    /// Итоги проверок слежек площадки `source` одной строкой состояния.
+    pub fn report(&self, watches: &[Watch], source: SourceKind, now: DateTime<Local>) -> SourceReport {
+        let own: Vec<&Watch> = watches.iter().filter(|watch| watch.source == source).collect();
+        let runs: Vec<&RunStatus> = own.iter().filter_map(|watch| self.runs.get(&watch.id)).collect();
+        let last_success = runs
+            .iter()
+            .filter(|run| !matches!(run.outcome, Outcome::Failed(_)))
+            .map(|run| run.at)
+            .max();
+        let failure_since = runs
+            .iter()
+            .filter(|run| last_success.is_none_or(|success| run.at > success))
+            .filter_map(|run| match &run.outcome {
+                Outcome::Failed(reason) => Some((run.at, reason.clone())),
+                _ => None,
+            })
+            .max_by_key(|(at, _)| *at);
+        SourceReport {
+            watches: own.len(),
+            enabled: own.iter().filter(|watch| watch.enabled).count(),
+            last_success,
+            failure_since,
+            pause: self.pause(source, now),
+        }
+    }
+
     /// Слежку изменили или удалили: её прошлые итоги больше ни о чём не говорят.
     pub fn forget(&mut self, watch_id: u64) {
         self.runs.remove(&watch_id);
@@ -169,6 +207,54 @@ mod tests {
             news: 0,
             hidden_suspicious: 0,
         }
+    }
+
+    #[test]
+    fn source_report_names_the_last_success_and_only_a_failure_after_it() {
+        let now = Local::now();
+        let avito = |id| Watch {
+            source: SourceKind::Avito,
+            ..watch(id)
+        };
+        let watches = [
+            watch(1),
+            avito(2),
+            Watch {
+                enabled: false,
+                ..avito(3)
+            },
+        ];
+        let mut schedule = Schedule::default();
+        schedule.record(1, now - Duration::minutes(30), Outcome::Failed("старый сбой".into()));
+        schedule.record(2, now - Duration::minutes(20), checked());
+        schedule.record(
+            3,
+            now - Duration::minutes(5),
+            Outcome::Failed("Авито просит проверку".into()),
+        );
+        schedule.captcha(SourceKind::Avito, now);
+
+        let report = schedule.report(&watches, SourceKind::Avito, now);
+        assert_eq!((report.watches, report.enabled), (2, 1));
+        assert_eq!(report.last_success, Some(now - Duration::minutes(20)));
+        assert_eq!(
+            report.failure_since,
+            Some((now - Duration::minutes(5), "Авито просит проверку".to_string()))
+        );
+        assert!(report.pause.is_some());
+
+        schedule.record(2, now, checked());
+        assert_eq!(
+            schedule.report(&watches, SourceKind::Avito, now).failure_since,
+            None,
+            "после удачной сбой забыт"
+        );
+        let ozon = schedule.report(&watches, SourceKind::Ozon, now);
+        assert_eq!(
+            (ozon.last_success, ozon.failure_since.map(|(_, reason)| reason)),
+            (None, Some("старый сбой".into()))
+        );
+        assert_eq!(schedule.report(&watches, SourceKind::Dns, now).watches, 0);
     }
 
     #[test]

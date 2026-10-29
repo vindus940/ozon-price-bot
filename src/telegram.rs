@@ -10,7 +10,9 @@ use teloxide::types::{ChatId, InputFile, LinkPreviewOptions, ParseMode, UserId};
 
 use crate::export;
 use crate::health::ParserCheck;
-use crate::hunt::{Alert, Hunter, Notifier, RunStatus, Watch};
+use crate::hunt::{Alert, Hunter, Notifier, RunStatus, SourceReport, Watch};
+use crate::marketplace::SourceKind;
+use crate::marketplace::ozon::Ozon;
 use crate::search::{OfferSearch, SearchRequest};
 
 const WITHOUT_LINK_PREVIEW: LinkPreviewOptions = LinkPreviewOptions {
@@ -29,10 +31,11 @@ pub struct TelegramSettings {
     pub top: usize,
 }
 
-/// Отвечает в чате: ищет по запросу и управляет слежками охотника.
+/// Отвечает в чате: ищет по запросу, управляет слежками охотника и рассказывает, как дела у браузера и площадок.
 struct ChatBot {
     search: OfferSearch,
     hunter: Arc<Hunter>,
+    ozon: Arc<Ozon>,
     allowed_users: HashSet<u64>,
     top: usize,
 }
@@ -69,6 +72,7 @@ pub async fn run(
     settings: TelegramSettings,
     search: OfferSearch,
     hunter: Arc<Hunter>,
+    ozon: Arc<Ozon>,
     parser_check: Option<ParserCheck>,
 ) {
     if let Some(check) = parser_check {
@@ -81,6 +85,7 @@ pub async fn run(
     let chat_bot = Arc::new(ChatBot {
         search,
         hunter,
+        ozon,
         allowed_users: settings.allowed_users,
         top: settings.top,
     });
@@ -105,6 +110,13 @@ impl ChatBot {
             Reply::AccessDenied { user_id } => render::access_denied(user_id),
             Reply::Help => render::HELP.to_string(),
             Reply::Search(request) => return self.answer(bot, chat, &request).await,
+            Reply::Status => {
+                let reports: Vec<(SourceKind, SourceReport)> = SourceKind::ALL
+                    .into_iter()
+                    .map(|source| (source, self.hunter.source_report(source)))
+                    .collect();
+                render::status(self.ozon.site_status().await, &reports)
+            }
             Reply::Watches => {
                 let watches: Vec<(Watch, Option<RunStatus>)> = self
                     .hunter
@@ -176,6 +188,7 @@ enum Reply {
     },
     Help,
     Search(SearchRequest),
+    Status,
     Watches,
     Watch(WatchAction, u64),
     /// Команда слежки без номера — подсказать, где его взять.
@@ -223,6 +236,7 @@ fn command_reply(command: &str) -> Reply {
     let name = words.next().unwrap_or_default();
     let name = name.split('@').next().unwrap_or_default();
     let action = match name {
+        "status" => return Reply::Status,
         "watches" => return Reply::Watches,
         "pause" => WatchAction::Pause,
         "resume" => WatchAction::Resume,
@@ -267,6 +281,7 @@ mod tests {
     #[test]
     fn watch_commands_take_the_number_from_the_list() {
         assert_eq!(reply("/watches", OWNER), Reply::Watches);
+        assert_eq!(reply("/status", OWNER), Reply::Status);
         assert_eq!(reply("/pause 3", OWNER), Reply::Watch(WatchAction::Pause, 3));
         assert_eq!(reply("/resume №3", OWNER), Reply::Watch(WatchAction::Resume, 3));
         assert_eq!(reply("/check@hunt_bot 12", OWNER), Reply::Watch(WatchAction::Check, 12));

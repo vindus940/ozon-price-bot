@@ -39,7 +39,7 @@ pub use market::MarketPrice;
 pub use market::PerUnit;
 use memory::{Notified, PriceNews};
 use schedule::Schedule;
-pub use schedule::{Outcome, Pause, RunStatus};
+pub use schedule::{Outcome, Pause, RunStatus, SourceReport};
 pub use trial::TrialStatus;
 use trial::Trials;
 pub use watch::{Goal, Hours, Watch};
@@ -226,6 +226,12 @@ impl Hunter {
     /// Ждут ли слежки площадки после проверки «я не робот».
     pub fn source_pause(&self, source: SourceKind) -> Option<Pause> {
         self.state().schedule.pause(source, Local::now())
+    }
+
+    /// Как дела у слежек площадки: последняя удачная проверка, сбой после неё, пауза.
+    pub fn source_report(&self, source: SourceKind) -> SourceReport {
+        let state = self.state();
+        state.schedule.report(state.book.all(), source, Local::now())
     }
 
     /// Новая слежка (id = 0) или правка существующей. Правка начинает слежку заново:

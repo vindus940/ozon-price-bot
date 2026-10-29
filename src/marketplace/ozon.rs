@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::browser::{Browser, Tab};
-use crate::marketplace::{Area, OfferSource, Product, SourceError};
+use crate::marketplace::{Area, OfferSource, Product, SiteStatus, SourceError};
 use crate::offer::Offer;
 use crate::wait;
 
@@ -56,6 +56,17 @@ impl Ozon {
 
     pub async fn open(&self) -> Result<(), SourceError> {
         self.ready_tab().await.map(drop)
+    }
+
+    /// Что сейчас в браузере программы — только посмотреть: закрытый браузер не запускается, вкладка не открывается.
+    pub async fn site_status(&self) -> SiteStatus {
+        if !self.browser.is_running().await {
+            SiteStatus::BrowserClosed
+        } else if self.browser.has_tab(HOME).await {
+            SiteStatus::Open
+        } else {
+            SiteStatus::NotOpened
+        }
     }
 
     async fn ready_tab(&self) -> Result<Tab, SourceError> {

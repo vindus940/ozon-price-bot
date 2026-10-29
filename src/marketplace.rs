@@ -162,6 +162,15 @@ pub struct Product {
     pub price_without_card: Option<u64>,
 }
 
+/// Сайт в браузере программы, как он виден со стороны: браузер не запущен, запущен без вкладки сайта или с ней.
+/// Закрытый браузер — не поломка: он откроется сам при следующем поиске.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteStatus {
+    BrowserClosed,
+    NotOpened,
+    Open,
+}
+
 /// Где искать: вокруг точки в радиусе. Площадки без адресов товаров его не учитывают.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Area {

@@ -59,6 +59,7 @@ fn main() -> Result<()> {
     let browser = Arc::new(Browser::new(config.browser)?);
     let ozon = Arc::new(Ozon::new(Arc::clone(&browser), config.ozon_portions));
     runtime.spawn(open_ozon(Arc::clone(&ozon)));
+    let ozon_site = Arc::clone(&ozon);
     let throttled = |source: Arc<dyn OfferSource>, kind: SourceKind| {
         Arc::new(Throttled::new(source, kind.search_gap())) as Arc<dyn OfferSource>
     };
@@ -101,6 +102,7 @@ fn main() -> Result<()> {
             telegram,
             OfferSearch::new(ozon),
             Arc::clone(&hunter),
+            ozon_site,
             parser_check,
         ));
     } else {

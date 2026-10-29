@@ -1,10 +1,10 @@
-use crate::format::{price_drop, rub, signed_rub, tile_marks};
-use crate::health::{Health, Problem};
 use teloxide::types::BotCommand;
 
 use super::WatchAction;
-use crate::hunt::{Alert, Deal, Goal, Lowest, Outcome, RunStatus, Watch};
-use crate::marketplace::{Product, SourceError};
+use crate::format::{price_drop, rub, signed_rub, tile_marks};
+use crate::health::{Health, Problem};
+use crate::hunt::{Alert, Deal, Goal, Lowest, Outcome, Pause, RunStatus, SourceReport, Watch};
+use crate::marketplace::{Product, SiteStatus, SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
 
@@ -37,12 +37,14 @@ pub(super) const HELP: &str = "Напишите, что ищете, — приш
 
 Слежками, заведёнными в окне программы, можно управлять отсюда:
 /watches — список с номерами и итогами проверок
-<code>/pause 3</code> — пауза, <code>/resume 3</code> — снова следить, <code>/check 3</code> — проверить сейчас";
+<code>/pause 3</code> — пауза, <code>/resume 3</code> — снова следить, <code>/check 3</code> — проверить сейчас
+/status — открыт ли браузер программы и когда площадки последний раз отвечали";
 
 /// Меню команд у поля ввода в Telegram.
 pub(super) fn commands() -> Vec<BotCommand> {
     [
         ("watches", "Слежки: номера и итоги проверок"),
+        ("status", "Браузер и площадки: всё ли работает"),
         ("pause", "Пауза слежки: /pause 3"),
         ("resume", "Снова следить: /resume 3"),
         ("check", "Проверить сейчас: /check 3"),
@@ -107,6 +109,63 @@ fn last_check(run: &RunStatus) -> String {
         Outcome::Failed(reason) => format!("проверка не удалась — {}", escape(reason)),
     };
     format!("{at}: {outcome}")
+}
+
+/// `/status`: браузер программы и по строке на каждую площадку, где есть слежки.
+pub(super) fn status(site: SiteStatus, reports: &[(SourceKind, SourceReport)]) -> String {
+    let browser = match site {
+        SiteStatus::Open => "открыт, вкладка Ozon на месте",
+        SiteStatus::NotOpened => "открыт, вкладки Ozon нет — откроется при следующем поиске",
+        SiteStatus::BrowserClosed => "закрыт — программа откроет его сама при следующем поиске",
+    };
+    let sources: Vec<String> = reports
+        .iter()
+        .filter(|(_, report)| report.watches > 0)
+        .map(|(source, report)| source_line(*source, report))
+        .collect();
+    let sources = if sources.is_empty() {
+        "Слежек пока нет.".to_string()
+    } else {
+        sources.join("\n\n")
+    };
+    format!("🩺 Браузер программы {browser}.\n\n{sources}")
+}
+
+fn source_line(source: SourceKind, report: &SourceReport) -> String {
+    let success = report.last_success.map_or_else(
+        || "удачных проверок ещё не было".to_string(),
+        |at| format!("последняя удачная проверка {}", at.format("%d.%m %H:%M")),
+    );
+    let failure = report
+        .failure_since
+        .as_ref()
+        .map(|(at, reason)| {
+            format!(
+                "\nПосле неё ({}) не удалось: {}",
+                at.format("%d.%m %H:%M"),
+                escape(reason)
+            )
+        })
+        .unwrap_or_default();
+    let pause = match report.pause {
+        Some(Pause::Until(until)) => format!(
+            "\nСлежки {} ждут до {} после проверки «я не робот».",
+            source.title(),
+            until.format("%H:%M")
+        ),
+        Some(Pause::UntilManualCheck) => format!(
+            "\nСлежки {} остановлены после трёх проверок «я не робот» подряд — пройдите проверку в окне браузера \
+             и нажмите «Проверить сейчас» (или /check N).",
+            source.title()
+        ),
+        None => String::new(),
+    };
+    format!(
+        "<b>{}</b> — слежек {}, включено {}: {success}.{failure}{pause}",
+        source.title(),
+        report.watches,
+        report.enabled
+    )
 }
 
 pub(super) fn which_watch(action: WatchAction) -> String {
@@ -926,7 +985,48 @@ mod tests {
             which_watch(WatchAction::Check),
             "Напишите номер слежки: /check 3. Номера — в /watches."
         );
-        assert_eq!(commands().len(), 5);
+        assert_eq!(commands().len(), 6);
+    }
+
+    #[test]
+    fn status_names_the_browser_and_each_source_with_watches() {
+        let at = |hour, minute| Local.with_ymd_and_hms(2026, 10, 29, hour, minute, 0).unwrap();
+        let report = |watches, last_success, failure_since, pause| SourceReport {
+            watches,
+            enabled: watches,
+            last_success,
+            failure_since,
+            pause,
+        };
+        let text = status(
+            SiteStatus::Open,
+            &[
+                (SourceKind::Ozon, report(2, Some(at(12, 0)), None, None)),
+                (
+                    SourceKind::Avito,
+                    report(
+                        1,
+                        Some(at(9, 30)),
+                        Some((at(11, 40), "Авито просит <проверку>".into())),
+                        Some(Pause::Until(at(12, 15))),
+                    ),
+                ),
+                (SourceKind::Dns, report(0, None, None, None)),
+            ],
+        );
+
+        assert_eq!(
+            text,
+            "🩺 Браузер программы открыт, вкладка Ozon на месте.\n\n\
+             <b>Ozon</b> — слежек 2, включено 2: последняя удачная проверка 29.10 12:00.\n\n\
+             <b>Авито</b> — слежек 1, включено 1: последняя удачная проверка 29.10 09:30.\n\
+             После неё (29.10 11:40) не удалось: Авито просит &lt;проверку&gt;\n\
+             Слежки Авито ждут до 12:15 после проверки «я не робот»."
+        );
+        assert!(
+            status(SiteStatus::BrowserClosed, &[]).ends_with("при следующем поиске.\n\nСлежек пока нет."),
+            "закрытый браузер — не поломка"
+        );
     }
 
     fn headphones_watch(without_card: bool) -> Watch {

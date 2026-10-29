@@ -87,6 +87,16 @@ impl Browser {
         Ok(tab)
     }
 
+    /// Открыта ли вкладка с адресом, начинающимся с `home`. Ничего не запускает и не открывает:
+    /// закрытый браузер — просто `false`.
+    pub async fn has_tab(&self, home: &str) -> bool {
+        matches!(self.devtools.find_tab(home).await, Ok(Some(_)))
+    }
+
+    pub async fn is_running(&self) -> bool {
+        self.devtools.is_available().await
+    }
+
     async fn ensure_running(&self, start_url: &str) -> Result<()> {
         if self.devtools.is_available().await {
             return Ok(());
