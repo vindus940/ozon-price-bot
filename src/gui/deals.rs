@@ -1,7 +1,7 @@
 use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD};
-use crate::format::{rub, signed_rub, tile_marks};
+use crate::format::{price_drop, rub, signed_rub, tile_marks};
 use crate::hunt::{Deal, Hunter, Miss};
 
 /// Что показать после «мимо»: находка скрыта, а эти слова можно добавить слежке в стоп-слова.
@@ -94,6 +94,9 @@ pub(super) fn card(ui: &mut egui::Ui, deal: &Deal, actions: impl FnOnce(&mut egu
             ui.label(RichText::new(rub(deal.offer.price)).strong().size(18.0));
             if let Some(per_unit) = deal.per_unit {
                 ui.label(per_unit.price.to_string());
+            }
+            if let Some(before) = deal.price_before {
+                ui.colored_label(GOOD, format!("подешевело: {}", price_drop(before, deal.offer.price)));
             }
             ui.colored_label(GOOD, format!("−{}% к рынку", deal.discount_percent));
             let market = deal

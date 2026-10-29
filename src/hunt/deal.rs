@@ -24,6 +24,9 @@ pub struct Deal {
     pub suspicious: bool,
     #[serde(default)]
     pub per_unit: Option<PerUnit>,
+    /// Цена из прошлого уведомления, если предложение пришло снова, потому что подешевело.
+    #[serde(default)]
+    pub price_before: Option<u64>,
 }
 
 /// Почему находка — мимо. Такая находка уходит из ленты и больше не присылается этой слежкой.

@@ -26,12 +26,15 @@ pub struct Notified {
 
 impl Notified {
     /// Что из найденного стоит отправить: новое и заметно подешевевшее. Отобранное сразу запоминается,
-    /// а слежка считается запущенной, даже если отправлять нечего.
+    /// а слежка считается запущенной, даже если отправлять нечего. У подешевевшего — прошлая цена.
     pub fn take_news(&mut self, watch_id: u64, deals: &[Deal]) -> Vec<Deal> {
         let news: Vec<Deal> = deals
             .iter()
             .filter(|deal| self.is_news(watch_id, &deal.offer.url, deal.offer.price))
-            .cloned()
+            .map(|deal| Deal {
+                price_before: self.notified_price(watch_id, &deal.offer.url),
+                ..deal.clone()
+            })
             .collect();
         self.mark_started(watch_id);
         for deal in &news {
@@ -49,10 +52,14 @@ impl Notified {
         if self.dismissed.get(&watch_id).is_some_and(|urls| urls.contains(url)) {
             return false;
         }
-        match self.by_watch.get(&watch_id).and_then(|seen| seen.get(url)) {
+        match self.notified_price(watch_id, url) {
             None => true,
-            Some(&notified_price) => price * 100 <= notified_price * (100 - NOTEWORTHY_DROP_PERCENT),
+            Some(notified_price) => price * 100 <= notified_price * (100 - NOTEWORTHY_DROP_PERCENT),
         }
+    }
+
+    fn notified_price(&self, watch_id: u64, url: &str) -> Option<u64> {
+        self.by_watch.get(&watch_id)?.get(url).copied()
     }
 
     fn remember(&mut self, watch_id: u64, url: &str, price: u64) {
@@ -118,6 +125,40 @@ mod tests {
         assert!(!notified.is_news(7, "a", 9_800));
         assert!(notified.is_news(7, "a", 9_700));
         assert!(notified.is_news(7, "b", 10_000));
+    }
+
+    fn deal(price: u64) -> Deal {
+        Deal {
+            watch_id: 7,
+            watch_name: "Айфон".into(),
+            found_at: chrono::Local::now(),
+            offer: crate::offer::Offer {
+                url: "https://example.com/a".into(),
+                ..crate::offer::Offer::sample("iPhone 15", price)
+            },
+            market_price: 70_000,
+            market_sample: 9,
+            discount_percent: 20,
+            resale_profit: None,
+            suspicious: false,
+            per_unit: None,
+            price_before: None,
+        }
+    }
+
+    #[test]
+    fn offer_that_came_again_cheaper_carries_its_notified_price() {
+        let mut notified = Notified::default();
+        let before = |news: Vec<Deal>| news.iter().map(|deal| deal.price_before).collect::<Vec<_>>();
+
+        assert_eq!(before(notified.take_news(7, &[deal(10_000)])), [None]);
+        assert_eq!(before(notified.take_news(7, &[deal(9_800)])), []);
+        assert_eq!(before(notified.take_news(7, &[deal(9_000)])), [Some(10_000)]);
+        assert_eq!(
+            before(notified.take_news(7, &[deal(8_500)])),
+            [Some(9_000)],
+            "сравнивается с последним уведомлением"
+        );
     }
 
     #[test]

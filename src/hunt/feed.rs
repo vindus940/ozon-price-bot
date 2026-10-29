@@ -68,6 +68,7 @@ mod tests {
             resale_profit: None,
             suspicious: false,
             per_unit: None,
+            price_before: None,
         }
     }
 
@@ -110,6 +111,16 @@ mod tests {
 
         assert!(saved.is_array());
         assert_eq!(prices(&serde_json::from_value(saved).unwrap()), [58_000]);
+    }
+
+    #[test]
+    fn deals_saved_before_price_drops_are_read() {
+        let mut saved = serde_json::to_value(deal(1, "a", 58_000)).unwrap();
+        saved.as_object_mut().unwrap().remove("price_before");
+
+        let feed: Feed = serde_json::from_value(serde_json::Value::Array(vec![saved])).unwrap();
+
+        assert_eq!(feed.deals()[0].price_before, None);
     }
 
     #[test]

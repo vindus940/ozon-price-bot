@@ -22,6 +22,12 @@ pub fn signed_rub(amount: i64) -> String {
     }
 }
 
+/// Находка пришла снова, потому что подешевела: «5 000 ₽ → 4 500 ₽ (−10%)».
+pub fn price_drop(before: u64, now: u64) -> String {
+    let percent = before.saturating_sub(now) * 100 / before.max(1);
+    format!("{} → {} (−{percent}%)", rub(before), rub(now))
+}
+
 /// Что ещё известно о предложении с плитки: «доставка завтра · продаёт Ozon · бренд проверен». Пусто, если ничего.
 pub fn tile_marks(offer: &Offer) -> String {
     let delivery = offer
@@ -47,6 +53,11 @@ mod tests {
         assert_eq!(rub(1990), "1\u{a0}990\u{a0}₽");
         assert_eq!(rub(1_234_567), "1\u{a0}234\u{a0}567\u{a0}₽");
         assert_eq!(signed_rub(-1500), "−1\u{a0}500\u{a0}₽");
+    }
+
+    #[test]
+    fn price_drop_names_both_prices_and_the_percent() {
+        assert_eq!(price_drop(5_000, 4_500), "5\u{a0}000\u{a0}₽ → 4\u{a0}500\u{a0}₽ (−10%)");
     }
 
     #[test]

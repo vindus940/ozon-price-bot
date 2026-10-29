@@ -141,6 +141,7 @@ mod tests {
             resale_profit: None,
             suspicious: false,
             per_unit: None,
+            price_before: None,
         };
         Assessment {
             scanned: 50,

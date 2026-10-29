@@ -131,6 +131,7 @@ pub fn assess(watch: &Watch, offers: Vec<Offer>, now: DateTime<Local>) -> Assess
             resale_profit: verdict.resale_profit,
             suspicious: verdict.suspicious,
             per_unit,
+            price_before: None,
         });
     }
     let (suspicious, mut suitable): (Vec<Deal>, Vec<Deal>) = deals

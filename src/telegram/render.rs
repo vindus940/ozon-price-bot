@@ -1,4 +1,4 @@
-use crate::format::{rub, signed_rub, tile_marks};
+use crate::format::{price_drop, rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
 use crate::hunt::{Alert, Deal, Goal, Lowest, Watch};
 use crate::marketplace::SourceError;
@@ -320,6 +320,10 @@ fn deal_entry(deal: &Deal, lowest: Option<Lowest>) -> String {
         .resale_profit
         .map(|profit| format!("\nНа перепродаже ≈ {} выгоды", signed_rub(profit)))
         .unwrap_or_default();
+    let drop = deal
+        .price_before
+        .map(|before| format!("\n⬇️ Подешевело: {}", price_drop(before, deal.offer.price)))
+        .unwrap_or_default();
     let history = history_line(deal, lowest);
     let whereabouts = whereabouts(&deal.offer);
     let whereabouts = if whereabouts.is_empty() {
@@ -339,7 +343,7 @@ fn deal_entry(deal: &Deal, lowest: Option<Lowest>) -> String {
         None => (String::new(), rub(deal.market_price)),
     };
     format!(
-        "\n\n<b>{price}</b>{unit_price} — на {discount}% ниже рынка ({market}, по {sample} похожим){resale}{history}{whereabouts}{marks}{warning}\n<a href=\"{url}\">{name}</a>",
+        "\n\n<b>{price}</b>{unit_price} — на {discount}% ниже рынка ({market}, по {sample} похожим){drop}{resale}{history}{whereabouts}{marks}{warning}\n<a href=\"{url}\">{name}</a>",
         price = rub(deal.offer.price),
         discount = deal.discount_percent,
         sample = deal.market_sample,
@@ -530,7 +534,18 @@ mod tests {
             resale_profit: Some(3_500),
             suspicious: false,
             per_unit: None,
+            price_before: None,
         }
+    }
+
+    #[test]
+    fn deal_that_came_again_cheaper_says_what_it_cost_before() {
+        let cheaper = Deal {
+            price_before: Some(5_000),
+            ..deal(4_500)
+        };
+        assert!(deal_entry(&cheaper, None).contains("\n⬇️ Подешевело: 5\u{a0}000\u{a0}₽ → 4\u{a0}500\u{a0}₽ (−10%)\n"));
+        assert!(!deal_entry(&deal(4_500), None).contains("Подешевело"));
     }
 
     #[test]
