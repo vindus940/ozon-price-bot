@@ -4,6 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::offer::Offer;
+use crate::search::first_mention;
 use crate::text::{normalize, words};
 
 /// Брак и подделки в названии не участвуют в рыночной цене ни в одной категории.
@@ -90,7 +91,10 @@ impl Category {
             Category::Electronics => {
                 "Не сравнивает с чехлами, стёклами, кабелями и с другими версиями модели (Pro, Max, Plus, Mini…)"
             }
-            Category::Appliances => "Не сравнивает с фильтрами, мешками, насадками и другими расходниками",
+            Category::Appliances => {
+                "Не сравнивает с фильтрами, мешками, насадками, другими расходниками и с другими версиями модели \
+                 (Pro, Plus, Ultra…)"
+            }
             Category::Tools => {
                 "Не сравнивает с битами, дисками, отдельными аккумуляторами и «тушками» без аккумулятора"
             }
@@ -98,7 +102,9 @@ impl Category {
                 "Сравнивает цену за килограмм, литр или штуку по фасовке из названия: пачка 450 г и мешок 3 кг — честно. \
                  Предложения без фасовки в названии и просроченные не участвуют"
             }
-            Category::Any => "Только слова запроса и ваши стоп-слова; брак и подделки отсекаются всегда",
+            Category::Any => {
+                "Только слова запроса и ваши стоп-слова; брак, подделки и вещи «для» искомого отсекаются всегда"
+            }
         }
     }
 
@@ -125,6 +131,8 @@ impl Category {
                 "сумка для",
                 "подставка",
                 "наклейк",
+                "аксессуар",
+                "аккумулятор для",
             ],
             Category::Appliances => &[
                 "фильтр для",
@@ -135,6 +143,7 @@ impl Category {
                 "шланг для",
                 "запасн",
                 "держатель",
+                "аксессуар",
             ],
             Category::Tools => &[
                 "насадк",
@@ -158,8 +167,9 @@ impl Category {
     /// Другие версии модели: ищутся как отдельное слово, чтобы «pro» не цеплялось за «product».
     fn variants(self) -> &'static [&'static str] {
         match self {
-            Category::Electronics => &["pro", "max", "plus", "mini", "ultra", "lite", "se", "fe", "air"],
-            Category::Appliances | Category::Tools | Category::Consumables | Category::Any => &[],
+            Category::Electronics => &["pro", "max", "plus", "mini", "ultra", "lite", "se", "fe", "air", "ti"],
+            Category::Appliances => &["pro", "max", "plus", "mini", "ultra", "lite"],
+            Category::Tools | Category::Consumables | Category::Any => &[],
         }
     }
 
@@ -195,8 +205,15 @@ impl Category {
             .iter()
             .any(|variant| title_words.iter().any(|w| w == variant) && !query_words.iter().any(|w| w == variant));
 
-        !foreign_phrase && !foreign_variant
+        !foreign_phrase && !foreign_variant && !made_for(query, &title_words)
     }
+}
+
+/// «Руль … (для Xbox Series X/S)», «Аккумулятор … для GOPRO HERO 13»: искомое названо сразу после «для» —
+/// значит, это вещь для него, в любой категории. «Фен для волос Dyson» — сам фен: после «для» идёт не запрос;
+/// «Чехол для iPhone» по запросу «чехол iphone» — сам чехол: «чехол» из запроса стоит раньше «для».
+fn made_for(query: &str, title_words: &[String]) -> bool {
+    first_mention(title_words, query).is_some_and(|first| title_words[..first].last().is_some_and(|word| word == "для"))
 }
 
 #[cfg(test)]
@@ -232,6 +249,67 @@ mod tests {
         let appliances = Category::Appliances;
         assert!(appliances.is_comparable("пылесос dyson v8", "Пылесос Dyson V8 Absolute"));
         assert!(!appliances.is_comparable("пылесос dyson v8", "Фильтр для пылесоса Dyson V8"));
+    }
+
+    #[test]
+    fn robot_vacuum_is_not_its_accessories_or_other_versions() {
+        let appliances = Category::Appliances;
+        assert!(appliances.is_comparable("roborock s8", "Робот-пылесос Roborock S8, Black (S80ULT)"));
+        for title in [
+            "Тряпки из микрофибры для робота пылесоса Roborock S7 MaxV S8 Plus T7s G10",
+            "Комплект фильтров и щеток для робота-пылесоса Roborock S8, S8 Plus, S8 Pro Ultra (чёрные щётки)",
+            "Аксессуары для роботов-пылесосов Roborock S8 Pro / Roborock S9 Plus.(фильтры, боковые щётки, салфетки)",
+            "Подарочный набор аксессуаров для Roborock S8 Max Ultra / S8 / S8 Plus: моющиеся фильтры 2",
+            "Набор аксессуаров к роботу-пылесосу Roborock S8",
+            "Робот-пылесос Roborock S8 Pro Ultra, белый",
+        ] {
+            assert!(!appliances.is_comparable("roborock s8", title), "{title}");
+        }
+    }
+
+    #[test]
+    fn wheel_for_xbox_is_not_xbox() {
+        let electronics = Category::Electronics;
+        assert!(!electronics.is_comparable(
+            "xbox series x",
+            "Руль Logitech G923 TRUEFORCE (для Xbox Series X/S/One/PC)"
+        ));
+        assert!(!electronics.is_comparable(
+            "xbox series x",
+            "Аккумулятор для геймпада Xbox Series X/Series S/ Xbox One с кабелем зарядки Type-C"
+        ));
+    }
+
+    #[test]
+    fn things_for_gopro_are_not_gopro_in_any_category() {
+        let electronics = Category::Electronics;
+        assert!(electronics.is_comparable(
+            "gopro hero 13",
+            "GoPro Экшн-камера GoPro Hero 13 Black, черный матовый, черный"
+        ));
+        assert!(!electronics.is_comparable(
+            "gopro hero 13",
+            "K&F CONCEPT CPL светофильтр для GoPro Hero 9/10/11/12/13 поляризационный, AGC оптическое стекло"
+        ));
+        assert!(!Category::Any.is_comparable("gopro hero 13", "Аккумулятор Kingma для GoPro HERO 13, 1900 мАч"));
+        assert!(!electronics.is_comparable("gopro hero 13", "Набор аксессуаров для экшн-камеры GoPro HERO 13 Black"));
+    }
+
+    #[test]
+    fn purpose_after_for_is_not_an_accessory() {
+        assert!(
+            Category::Appliances.is_comparable("dyson airwrap", "Стайлер для волос Dyson Airwrap Complete Long HS05")
+        );
+        assert!(Category::Consumables.is_comparable("persil", "Гель для стирки Persil 1 л"));
+        assert!(Category::Electronics.is_comparable("чехол iphone 15", "Чехол для iPhone 15 силиконовый"));
+    }
+
+    #[test]
+    fn graphics_card_without_ti_is_not_ti() {
+        assert!(!Category::Electronics.is_comparable(
+            "rtx 5060",
+            "Palit Видеокарта GeForce RTX 5060 Ti Dual OC 8 ГБ (NE7506TT19P1-GB2062D)"
+        ));
     }
 
     #[test]

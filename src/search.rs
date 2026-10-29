@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::marketplace::{OfferSource, SourceError};
 use crate::offer::Offer;
 use crate::quantity::{Quantity, Unit, UnitPrice, most_common_unit};
-pub use filter::{OfferFilter, mentions};
+pub use filter::{OfferFilter, first_mention, mentions};
 pub use order::Order;
 pub use request::{PriceRange, SearchRequest, ShopConditions};
 

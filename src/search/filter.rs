@@ -1,7 +1,7 @@
 use crate::offer::Offer;
 use crate::search::synonyms::spellings;
 use crate::search::{PriceRange, SearchRequest, ShopConditions};
-use crate::text::{normalize, words};
+use crate::text::words;
 
 pub struct OfferFilter {
     required: Vec<Keyword>,
@@ -32,7 +32,7 @@ impl OfferFilter {
     }
 
     fn matches_words(&self, name: &str) -> bool {
-        let name = normalize(name);
+        let name = words(name);
         self.required.iter().all(|keyword| keyword.occurs_in(&name))
             && !self.excluded.iter().any(|keyword| keyword.occurs_in(&name))
     }
@@ -47,28 +47,83 @@ impl OfferFilter {
     }
 }
 
-/// Встречается ли слово в тексте так, как его ищет фильтр — без окончания и во всех написаниях бренда.
+/// Встречается ли слово в тексте так, как его ищет фильтр — русское без окончания, латиница и числа целиком,
+/// во всех написаниях бренда.
 /// По этому правилу стоп-слово убирает предложение, поэтому и подбирать стоп-слова нужно по нему же.
 pub fn mentions(text: &str, word: &str) -> bool {
-    let text = normalize(text);
+    let text = words(text);
     Keyword::all_in(word).iter().all(|keyword| keyword.occurs_in(&text))
 }
 
-/// Слово запроса без окончания и во всех написаниях бренда: «наушники» находит и «наушников»,
-/// «makita» — и «Макиту».
-struct Keyword(Vec<String>);
+/// Номер первого слова названия, в котором есть слово запроса, — по тому же правилу, что у фильтра.
+pub fn first_mention(title_words: &[String], query: &str) -> Option<usize> {
+    let keywords = Keyword::all_in(query);
+    title_words
+        .iter()
+        .position(|word| keywords.iter().any(|keyword| keyword.is_in(word)))
+}
+
+/// Слово запроса во всех написаниях бренда: «makita» находит и «Макиту».
+struct Keyword(Vec<Spelling>);
 
 impl Keyword {
+    /// Одна русская буква — предлог или союз («с», «в», «и»), а латинская буква или цифра — часть модели:
+    /// Xbox Series X, Switch 2.
     fn all_in(text: &str) -> Vec<Self> {
         words(text)
             .into_iter()
-            .filter(|word| word.chars().count() >= 2)
-            .map(|word| Self(spellings(&word).into_iter().map(stem).collect()))
+            .filter(|word| word.chars().count() >= 2 || word.chars().all(|c| c.is_ascii_alphanumeric()))
+            .map(|word| Self(spellings(&word).into_iter().map(Spelling::of).collect()))
             .collect()
     }
 
-    fn occurs_in(&self, normalized_text: &str) -> bool {
-        self.0.iter().any(|stem| normalized_text.contains(stem.as_str()))
+    fn occurs_in(&self, text_words: &[String]) -> bool {
+        text_words.iter().any(|word| self.is_in(word))
+    }
+
+    fn is_in(&self, word: &str) -> bool {
+        self.0.iter().any(|spelling| spelling.is_in(word))
+    }
+}
+
+/// Русское слово склоняется — ищется без окончания: «наушники» находит и «наушников». Латиница и числа
+/// не склоняются — ищутся целиком: «2» не находится в «2025», «ti» — в «Edition», «x» — в «Xbox».
+struct Spelling {
+    start: String,
+    any_ending: bool,
+}
+
+impl Spelling {
+    fn of(word: &str) -> Self {
+        let any_ending = !word.ends_with(|c: char| c.is_ascii_alphanumeric());
+        Self {
+            start: if any_ending { stem(word) } else { word.to_string() },
+            any_ending,
+        }
+    }
+
+    /// С начала слова или со стыка букв и цифр: продавцы склеивают модель — «HERO13», «RTX5060TI».
+    fn is_in(&self, word: &str) -> bool {
+        word.char_indices()
+            .filter(|&(at, c)| {
+                word[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|before| before.is_numeric() != c.is_numeric())
+            })
+            .filter_map(|(at, _)| word[at..].strip_prefix(self.start.as_str()))
+            .any(|rest| self.may_be_followed_by(rest))
+    }
+
+    fn may_be_followed_by(&self, rest: &str) -> bool {
+        let Some(next) = rest.chars().next() else {
+            return true;
+        };
+        if self.start.ends_with(char::is_numeric) {
+            !next.is_numeric()
+        } else {
+            self.any_ending || next.is_numeric()
+        }
     }
 }
 
@@ -179,7 +234,96 @@ mod tests {
     #[test]
     fn mentions_follows_the_same_rule_as_stop_words() {
         assert!(mentions("Наушники Logitech G435", "наушников"), "без окончания");
+        assert!(mentions("Шуруповерт Makita в кейсе", "кейс"), "с окончанием");
         assert!(mentions("Шуруповерт Макита", "makita"), "в другом написании бренда");
         assert!(!mentions("Наушники Logitech G435", "чехол"));
+        assert!(
+            !mentions("Apple iPhone 15 128GB (PRODUCT)RED", "pro"),
+            "латинское слово — целиком"
+        );
+    }
+
+    fn accepts(query: &str, title: &str) -> bool {
+        filter(query).accepts(&Offer::sample(title, 1))
+    }
+
+    #[test]
+    fn series_x_is_not_series_s() {
+        assert!(accepts(
+            "xbox series x",
+            "Игровая приставка Microsoft Xbox Series X 16 ГБ + 1 TБ, цифровая версия"
+        ));
+        assert!(!accepts(
+            "xbox series x",
+            "Игровая консоль Microsoft Xbox Series S 1 ТБ, белая"
+        ));
+    }
+
+    #[test]
+    fn switch_2_is_not_switch_oled() {
+        assert!(accepts(
+            "nintendo switch 2",
+            "Игровая консоль Nintendo Switch 2 (глобальная версия)"
+        ));
+        assert!(!accepts(
+            "nintendo switch 2",
+            "Игровая консоль Nintendo Switch OLED, 4/64 ГБ, белая (HEG-S-KAAAA)"
+        ));
+    }
+
+    #[test]
+    fn ultra_2_is_not_found_in_ultra_3_of_2025() {
+        assert!(accepts(
+            "apple watch ultra 2",
+            "Смарт-часы Apple Watch Ultra 2 49mm Titanium Case with Blue Alpine Loop, размер M (MREP3)"
+        ));
+        assert!(!accepts(
+            "apple watch ultra 2",
+            "Смарт-часы Apple Watch Ultra 3, 2025, GPS + Cellular, 49 mm, M/L (MF1H4AF/A)"
+        ));
+    }
+
+    #[test]
+    fn pocket_3_is_not_pocket_4() {
+        assert!(accepts(
+            "dji osmo pocket 3",
+            "Экшн-камера DJI Osmo Pocket 3 Creator Combo"
+        ));
+        assert!(!accepts(
+            "dji osmo pocket 3",
+            "Экшн-камера DJI Osmo Pocket 4 Creator Combo"
+        ));
+    }
+
+    #[test]
+    fn ti_is_not_found_inside_edition() {
+        assert!(accepts(
+            "rtx 5060 ti",
+            "Palit Видеокарта GeForce RTX 5060 Ti Dual OC 8 ГБ (NE7506TT19P1-GB2062D)"
+        ));
+        assert!(!accepts(
+            "rtx 5060 ti",
+            "ASUS Видеокарта GeForce RTX 5060 TUF Gaming OC Edition 8 ГБ (TUF-RTX5060-O8G-GAMING)"
+        ));
+    }
+
+    #[test]
+    fn words_glued_to_numbers_are_still_found() {
+        assert!(accepts("gopro hero 13", "Экшн-камера GoPro HERO13 Black"));
+        assert!(accepts("rtx 5060 ti", "Видеокарта MSI GeForce RTX5060Ti Ventus 2X"));
+        assert!(accepts(
+            "iphone 15 128",
+            "Apple Смартфон iPhone 15 EU 6/128 ГБ, Nano-SIM, eSIM, синий"
+        ));
+        assert!(accepts(
+            "ipad air m2",
+            "Apple Планшет iPad Air 13 M2, 13\" 256 ГБ, фиолетовый"
+        ));
+    }
+
+    #[test]
+    fn russian_word_is_found_with_any_ending_but_not_inside_another_word() {
+        assert!(accepts("робот пылесос", "Тряпки для робота-пылесоса"));
+        assert!(!accepts("самокат", "Электросамокат Ninebot"));
     }
 }
