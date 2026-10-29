@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geo::GeoPoint;
 use crate::hunt::category::Category;
-use crate::marketplace::{Area, Product, SourceKind};
+use crate::marketplace::{Area, Product, Scope, SourceKind};
 use crate::search::{PriceRange, SearchRequest, ShopConditions, mentions};
 use crate::text::words;
 
@@ -19,6 +19,14 @@ pub enum Goal {
     /// Дождаться цены одного товара по ссылке на его страницу (в `link`): не дороже `price`. Рынка тут нет —
     /// это запланированная покупка. `without_card` — сравнивать с ценой без Ozon Карты.
     TargetPrice { price: u64, without_card: bool },
+}
+
+/// У кого искать: у всех продавцов или только у частных (`SourceKind::has_private_sellers`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Sellers {
+    #[default]
+    Any,
+    Private,
 }
 
 /// Часы, в которые слежка проверяет площадку: с `from` часов включительно до `to` часов. `from` больше `to` —
@@ -83,6 +91,10 @@ pub struct Watch {
     /// новая и ношеная вещь разный товар. Для Авито: на Ozon всё новое.
     #[serde(default)]
     pub new_only: bool,
+    /// Только частные продавцы — без магазинов и перекупов (Авито). Это фильтр самого сайта, поэтому рынок тоже
+    /// считается по частным: с ними и придётся торговаться, и им же — продавать.
+    #[serde(default)]
+    pub sellers: Sellers,
     pub every_minutes: u32,
     /// Когда проверять; `None` — круглосуточно (так читаются и слежки, сохранённые до появления часов).
     /// «Проверить сейчас» и пробная проверка работают в любое время.
@@ -111,6 +123,7 @@ impl Watch {
             include_suspicious: false,
             shop: ShopConditions::default(),
             new_only: false,
+            sellers: Sellers::Any,
             every_minutes: 15,
             hours: None,
             enabled: true,
@@ -202,6 +215,14 @@ impl Watch {
         candidates
     }
 
+    /// Где и у кого искать на площадке: область вокруг дома и «только частные».
+    pub fn scope(&self, home: Option<GeoPoint>) -> Scope {
+        Scope {
+            area: self.search_area(home),
+            private_only: self.sellers == Sellers::Private && self.source.has_private_sellers(),
+        }
+    }
+
     /// Где искать на площадке. Рынок нужен шире вашего радиуса, иначе похожих не наберётся,
     /// поэтому берётся самый большой радиус площадки, а ваш применяется к выгодным предложениям.
     pub fn search_area(&self, home: Option<GeoPoint>) -> Option<Area> {
@@ -250,6 +271,7 @@ impl Watch {
                 watch.query.clone(),
                 watch.link.clone(),
                 watch.new_only,
+                watch.sellers,
                 watch.radius_km.is_some(),
                 product_price,
             )
@@ -733,6 +755,17 @@ mod tests {
 
         let mut saved = serde_json::to_value(watch()).unwrap();
         saved.as_object_mut().unwrap().remove("hours");
-        assert_eq!(serde_json::from_value::<Watch>(saved).unwrap().hours, None);
+        saved.as_object_mut().unwrap().remove("sellers");
+        let old: Watch = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            (old.hours, old.sellers),
+            (None, Sellers::Any),
+            "старые слежки — круглосуточно и у всех продавцов"
+        );
+        let private = Watch {
+            sellers: Sellers::Private,
+            ..watch()
+        };
+        assert!(!watch().same_market(&private), "рынок частных — другой рынок");
     }
 }

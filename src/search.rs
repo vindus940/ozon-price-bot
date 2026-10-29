@@ -5,7 +5,7 @@ mod synonyms;
 
 use std::sync::Arc;
 
-use crate::marketplace::{OfferSource, SourceError};
+use crate::marketplace::{OfferSource, Scope, SourceError};
 use crate::offer::Offer;
 use crate::quantity::{Quantity, Unit, UnitPrice, most_common_unit};
 pub use filter::{OfferFilter, first_mention, mentions};
@@ -42,7 +42,7 @@ impl OfferSearch {
     }
 
     pub async fn find(&self, request: &SearchRequest) -> Result<Findings, SourceError> {
-        let offers = self.source.search(&request.query, None).await?;
+        let offers = self.source.search(&request.query, Scope::default()).await?;
         let scanned = offers.len();
         let filter = OfferFilter::new(request);
         let measured: Vec<(Offer, Option<Quantity>)> = offers
@@ -176,7 +176,7 @@ mod tests {
     #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1"]
     async fn orders_make_sense_on_live_site() {
         let ozon = crate::marketplace::ozon::Ozon::new(crate::browser::test_browser(), 3);
-        let offers = ozon.search("наушники sony", None).await.unwrap();
+        let offers = ozon.search("наушники sony", Scope::default()).await.unwrap();
         // Одна выдача на все три порядка: так сравнивается порядок, а не разные ответы Ozon.
         let search = OfferSearch::new(Arc::new(FakeSource::returning(offers)));
         let arranged = |text: &'static str| {

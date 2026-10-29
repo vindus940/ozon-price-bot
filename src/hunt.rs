@@ -42,7 +42,7 @@ use schedule::Schedule;
 pub use schedule::{Outcome, Pause, RunStatus, SourceReport};
 pub use trial::TrialStatus;
 use trial::Trials;
-pub use watch::{Goal, Hours, Watch};
+pub use watch::{Goal, Hours, Sellers, Watch};
 
 use crate::format;
 use crate::geo::GeoPoint;
@@ -493,8 +493,8 @@ impl Hunter {
         let Some(url) = watch.source.cheapest_first(&watch.query, link.as_ref(), from, to) else {
             return Vec::new();
         };
-        let area = watch.search_area(self.state().home);
-        match source.search_link(&url, area).await {
+        let scope = watch.scope(self.state().home);
+        match source.search_link(&url, scope).await {
             Ok(found) => found,
             Err(error) => {
                 self.state().journal.write(format!(
@@ -520,13 +520,13 @@ impl Hunter {
                 "не указан дом — укажите его координаты в «Настройках»".into(),
             ));
         }
-        let area = watch.search_area(home);
+        let scope = watch.scope(home);
         let found = match watch.link.as_deref() {
             Some(link) => {
                 let link = watch.source.parse_link(link).map_err(CheckError::Setup)?;
-                source.search_link(&link, area).await
+                source.search_link(&link, scope).await
             }
-            None => source.search(&watch.query, area).await,
+            None => source.search(&watch.query, scope).await,
         };
         found.map_err(CheckError::Source)
     }
@@ -819,7 +819,7 @@ mod tests {
 
     use super::*;
     use crate::hunt::fixtures::{iphone_watch, market_offers, phone};
-    use crate::marketplace::Area;
+    use crate::marketplace::Scope;
     use crate::offer::Offer;
     use crate::search::PriceRange;
 
@@ -833,6 +833,7 @@ mod tests {
         captcha: AtomicBool,
         links: StdMutex<Vec<String>>,
         cheapest_links: StdMutex<Vec<String>>,
+        scopes: StdMutex<Vec<Scope>>,
     }
 
     impl ChangingSource {
@@ -850,20 +851,21 @@ mod tests {
             "Ozon"
         }
 
-        async fn search(&self, _query: &str, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+        async fn search(&self, _query: &str, scope: Scope) -> Result<Vec<Offer>, SourceError> {
+            self.scopes.lock().unwrap().push(scope);
             if self.captcha.load(Ordering::SeqCst) {
                 return Err(SourceError::Captcha);
             }
             Ok(self.offers.lock().unwrap().clone())
         }
 
-        async fn search_link(&self, link: &reqwest::Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+        async fn search_link(&self, link: &reqwest::Url, scope: Scope) -> Result<Vec<Offer>, SourceError> {
             if link.as_str().contains("sorting=price") {
                 self.cheapest_links.lock().unwrap().push(link.to_string());
                 return Ok(self.cheapest.lock().unwrap().clone());
             }
             self.links.lock().unwrap().push(link.to_string());
-            self.search("", area).await
+            self.search("", scope).await
         }
 
         async fn product(&self, link: &reqwest::Url) -> Result<Product, SourceError> {
@@ -1381,6 +1383,38 @@ mod tests {
 
         assert!(problems[0].contains("уже удалили"));
         assert!(hunter.watches().is_empty());
+    }
+
+    #[tokio::test]
+    async fn private_sellers_only_reach_avito_and_never_ozon() {
+        let source = ChangingSource::with(market_offers());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("private");
+        let hunter = hunter_with(&source, &notifier, &storage);
+        let on = |source| Watch {
+            source,
+            sellers: Sellers::Private,
+            every_minutes: 15,
+            ..iphone_watch()
+        };
+        let avito = hunter.save_watch(on(SourceKind::Avito)).unwrap();
+        let ozon = hunter.save_watch(on(SourceKind::Ozon)).unwrap();
+
+        hunter.check(avito).await;
+        hunter.check(ozon).await;
+
+        let private: Vec<bool> = source
+            .scopes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|scope| scope.private_only)
+            .collect();
+        assert_eq!(
+            private,
+            [true, false],
+            "у Ozon нет частных продавцов — галочка до него не доходит"
+        );
     }
 
     #[tokio::test]

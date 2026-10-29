@@ -40,12 +40,14 @@
     : 'loading';
 
   // stale — это ещё старая страница: программа помечает её перед переходом.
-  // path и radius — где страница оказалась на самом деле: Авито может перевести поиск в другой раздел.
+  // path, radius и user — где страница оказалась на самом деле: Авито может перевести поиск в другой раздел
+  // и выбросить по дороге радиус или фильтр «Частные».
   return {
     stale: !!window.__huntStale,
     state,
     path: location.pathname,
     radius: new URL(location.href).searchParams.get('radius'),
+    user: new URL(location.href).searchParams.get('user'),
     cards,
   };
 })()

@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, RichText};
 use super::watch_form::WatchForm;
 use super::{BAD, GOOD, WARN};
 use crate::format::rub;
-use crate::hunt::{Goal, Hours, Hunter, Outcome, Pause, RunStatus, Watch};
+use crate::hunt::{Goal, Hours, Hunter, Outcome, Pause, RunStatus, Sellers, Watch};
 use crate::marketplace::SourceKind;
 
 pub(super) fn show(ui: &mut egui::Ui, hunter: &Hunter, form: &mut Option<WatchForm>, pending_delete: &mut Option<u64>) {
@@ -152,6 +152,9 @@ fn conditions(watch: &Watch) -> String {
     parts.extend(watch.shop.labels().into_iter().map(String::from));
     if watch.new_only {
         parts.push("только новые".into());
+    }
+    if watch.sellers == Sellers::Private {
+        parts.push("только частные".into());
     }
     if !watch.stop_words.is_empty() {
         parts.push(format!("без: {}", watch.stop_words.join(", ")));

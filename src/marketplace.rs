@@ -82,6 +82,11 @@ impl SourceKind {
         self == SourceKind::Avito
     }
 
+    /// Продавцы делятся на частных и компании только на Авито (фильтр «Частные», `user=1`, 29.10.2026).
+    pub fn has_private_sellers(self) -> bool {
+        self == SourceKind::Avito
+    }
+
     /// Что важно знать о площадке, выбирая её для слежки.
     pub fn note(self) -> Option<&'static str> {
         match self {
@@ -203,6 +208,14 @@ pub struct Area {
     pub radius_km: u32,
 }
 
+/// Где и у кого искать: вокруг точки и только у частных продавцов. Площадка учитывает то, что умеет
+/// (`SourceKind::has_locations`, `SourceKind::has_private_sellers`), остальное пропускает.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Scope {
+    pub area: Option<Area>,
+    pub private_only: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum SourceError {
     #[error("площадка просит подтвердить, что вы не робот")]
@@ -217,15 +230,16 @@ pub enum SourceError {
 ///
 /// Возвращает всё найденное по запросу как есть — отбор и сортировка не её забота.
 /// У каждого предложения цена больше нуля, а ссылка абсолютная и без параметров отслеживания.
-/// Если передана область и площадка знает адреса товаров, у предложений заполнено `distance_km` от её центра.
+/// Если в `scope` передана область и площадка знает адреса товаров, у предложений заполнено `distance_km`
+/// от её центра.
 #[async_trait]
 pub trait OfferSource: Send + Sync {
     fn name(&self) -> &'static str;
 
-    async fn search(&self, query: &str, area: Option<Area>) -> Result<Vec<Offer>, SourceError>;
+    async fn search(&self, query: &str, scope: Scope) -> Result<Vec<Offer>, SourceError>;
 
     /// То же, но по ссылке на выдачу с фильтрами, настроенными на самом сайте (`SourceKind::parse_link`).
-    async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError>;
+    async fn search_link(&self, link: &Url, scope: Scope) -> Result<Vec<Offer>, SourceError>;
 
     /// Цена одного товара по ссылке на его страницу (`SourceKind::parse_product_link`).
     async fn product(&self, link: &Url) -> Result<Product, SourceError>;
@@ -238,7 +252,7 @@ pub mod testing {
     use async_trait::async_trait;
     use reqwest::Url;
 
-    use super::{Area, OfferSource, Product, SourceError};
+    use super::{OfferSource, Product, Scope, SourceError};
     use crate::offer::Offer;
 
     /// Площадка для тестов: отдаёт заданные предложения или просит проверку «я не робот» и запоминает запросы.
@@ -273,13 +287,13 @@ pub mod testing {
             "Fake"
         }
 
-        async fn search(&self, query: &str, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+        async fn search(&self, query: &str, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
             self.queries.lock().unwrap().push(query.to_string());
             self.offers.clone().ok_or(SourceError::Captcha)
         }
 
-        async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
-            self.search(link.as_str(), area).await
+        async fn search_link(&self, link: &Url, scope: Scope) -> Result<Vec<Offer>, SourceError> {
+            self.search(link.as_str(), scope).await
         }
 
         async fn product(&self, link: &Url) -> Result<Product, SourceError> {

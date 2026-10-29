@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::browser::{Browser, Tab};
-use crate::marketplace::{Area, OfferSource, Product, SiteStatus, SourceError};
+use crate::marketplace::{OfferSource, Product, Scope, SiteStatus, SourceError};
 use crate::offer::Offer;
 use crate::wait;
 
@@ -108,12 +108,12 @@ impl OfferSource for Ozon {
         "Ozon"
     }
 
-    async fn search(&self, query: &str, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search(&self, query: &str, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
         self.scan(&self.scan_expression(query, None)?).await
     }
 
     /// Ozon отдаёт выдачу по любому её адресу тем же запросом из вкладки, поэтому ссылка — это просто другой путь.
-    async fn search_link(&self, link: &Url, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search_link(&self, link: &Url, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
         let path = match link.query() {
             Some(query) => format!("{}?{query}", link.path()),
             None => link.path().to_string(),
@@ -379,7 +379,7 @@ mod tests {
     async fn finds_offers_on_live_site() {
         let ozon = Ozon::new(test_browser(), 2);
 
-        let offers = ozon.search("наушники sony", None).await.unwrap();
+        let offers = ozon.search("наушники sony", Scope::default()).await.unwrap();
 
         assert!(offers.len() >= 10, "собрано всего {}", offers.len());
         assert!(
@@ -410,7 +410,7 @@ mod tests {
             .cheapest_first("наушники sony", None, 3_000, 5_000)
             .unwrap();
 
-        let offers = ozon.search_link(&link, None).await.unwrap();
+        let offers = ozon.search_link(&link, Scope::default()).await.unwrap();
 
         assert!(offers.len() > 8, "собрано всего {}", offers.len());
         let outside: Vec<u64> = offers
@@ -453,7 +453,7 @@ mod tests {
             .parse_link("https://www.ozon.ru/category/audiotehnika-15543/?text=наушники&brand=32686750&delivery=2")
             .unwrap();
 
-        let offers = ozon.search_link(&link, None).await.unwrap();
+        let offers = ozon.search_link(&link, Scope::default()).await.unwrap();
 
         assert!(
             offers.len() > 8,

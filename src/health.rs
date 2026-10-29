@@ -2,7 +2,7 @@ use std::mem::{Discriminant, discriminant};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::marketplace::{OfferSource, SourceError};
+use crate::marketplace::{OfferSource, Scope, SourceError};
 use crate::offer::Offer;
 
 const MIN_OFFERS: usize = 10;
@@ -52,7 +52,7 @@ impl ParserCheck {
     }
 
     pub async fn run(&self) -> Health {
-        match self.source.search(&self.settings.query, None).await {
+        match self.source.search(&self.settings.query, Scope::default()).await {
             Ok(offers) => diagnose(offers),
             Err(error) => Health::Unavailable(error),
         }

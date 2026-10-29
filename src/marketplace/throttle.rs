@@ -6,7 +6,7 @@ use reqwest::Url;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
-use crate::marketplace::{Area, OfferSource, Product, SourceError};
+use crate::marketplace::{OfferSource, Product, Scope, SourceError};
 use crate::offer::Offer;
 
 /// Площадка с паузой между поисками. Пауза общая для всех, кто ищет на площадке, — слежек, бота и самопроверки:
@@ -43,14 +43,14 @@ impl OfferSource for Throttled {
         self.inner.name()
     }
 
-    async fn search(&self, query: &str, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search(&self, query: &str, scope: Scope) -> Result<Vec<Offer>, SourceError> {
         self.wait_turn().await;
-        self.inner.search(query, area).await
+        self.inner.search(query, scope).await
     }
 
-    async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search_link(&self, link: &Url, scope: Scope) -> Result<Vec<Offer>, SourceError> {
         self.wait_turn().await;
-        self.inner.search_link(link, area).await
+        self.inner.search_link(link, scope).await
     }
 
     async fn product(&self, link: &Url) -> Result<Product, SourceError> {
@@ -90,8 +90,8 @@ mod tests {
         let throttled = Throttled::new(Arc::new(fake), Duration::from_millis(300));
 
         let started = Instant::now();
-        throttled.search("наушники", None).await.unwrap();
-        throttled.search("чайник", None).await.unwrap();
+        throttled.search("наушники", Scope::default()).await.unwrap();
+        throttled.search("чайник", Scope::default()).await.unwrap();
 
         assert!(
             started.elapsed() >= Duration::from_millis(300),

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use eframe::egui::{self, RichText};
 
 use super::{BAD, WARN, trial};
-use crate::hunt::{Category, Goal, Hours, TrialStatus, Watch};
+use crate::hunt::{Category, Goal, Hours, Sellers, TrialStatus, Watch};
 use crate::marketplace::SourceKind;
 use crate::search::{PriceRange, ShopConditions};
 
@@ -53,6 +53,7 @@ pub(super) struct WatchForm {
     include_suspicious: bool,
     shop: ShopConditions,
     new_only: bool,
+    sellers: Sellers,
     every_minutes: u32,
     hours: Option<Hours>,
     pub(super) problems: Vec<String>,
@@ -95,6 +96,7 @@ impl WatchForm {
             include_suspicious: watch.include_suspicious,
             shop: watch.shop,
             new_only: watch.new_only,
+            sellers: watch.sellers,
             every_minutes: watch.every_minutes,
             hours: watch.hours,
             problems: Vec::new(),
@@ -297,6 +299,21 @@ impl WatchForm {
             ui.end_row();
         }
 
+        if self.source.has_private_sellers() {
+            ui.label("Продавцы");
+            ui.horizontal(|ui| {
+                let mut private = self.sellers == Sellers::Private;
+                if ui
+                    .checkbox(&mut private, "Только частные — без магазинов и перекупов")
+                    .changed()
+                {
+                    self.sellers = if private { Sellers::Private } else { Sellers::Any };
+                }
+                ui.weak("фильтр «Частные» самого Авито; рынок тоже по частным");
+            });
+            ui.end_row();
+        }
+
         ui.label("Слишком дёшево");
         ui.vertical(|ui| {
             ui.checkbox(
@@ -486,6 +503,11 @@ impl WatchForm {
                 only_ozon: self.shop.only_ozon && self.source.has_marketplace_seller(),
             },
             new_only: self.new_only && self.source.has_used_goods(),
+            sellers: if self.source.has_private_sellers() {
+                self.sellers
+            } else {
+                Sellers::Any
+            },
             every_minutes: self.every_minutes,
             hours: self.hours,
             enabled: self.enabled,
@@ -553,6 +575,7 @@ mod tests {
             include_suspicious: true,
             shop: ShopConditions::default(),
             new_only: true,
+            sellers: Sellers::Private,
             every_minutes: 20,
             hours: Some(Hours { from: 22, to: 7 }),
             enabled: false,

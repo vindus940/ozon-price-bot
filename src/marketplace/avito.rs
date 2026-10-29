@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::browser::{Browser, Tab};
 use crate::marketplace::page::{self, PageState, ScriptPage};
-use crate::marketplace::{Area, OfferSource, Product, SourceError};
+use crate::marketplace::{OfferSource, Product, Scope, SourceError};
 use crate::offer::Offer;
 use crate::storage::Storage;
 
@@ -19,6 +19,8 @@ const READ_SCRIPT: &str = include_str!("avito/read.js");
 const CATEGORIES_FILE: &str = "avito-categories.json";
 /// Сортировка «по дате»: свежие объявления первыми — ради них и проверяем.
 const NEWEST_FIRST: &str = "104";
+/// Фильтр продавцов «Частные» (`user=1`; 2 — «Компании»), проверено 29.10.2026.
+const PRIVATE_SELLERS: &str = "1";
 /// Так Авито отвечает, например, на опечатку в городе: avito.ru/moskwa.
 const NOT_FOUND: &str = "Авито ответил «страница не найдена» — проверьте город в «Настройках»";
 
@@ -72,6 +74,9 @@ struct Page {
     state: PageState,
     path: String,
     radius: Option<String>,
+    /// Фильтр продавцов в адресе страницы: `1` — «Частные».
+    #[serde(default)]
+    user: Option<String>,
     cards: Vec<Card>,
 }
 
@@ -118,40 +123,31 @@ impl OfferSource for Avito {
         "Авито"
     }
 
-    async fn search(&self, query: &str, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search(&self, query: &str, scope: Scope) -> Result<Vec<Offer>, SourceError> {
         let mut categories = self.categories.lock().await;
         let tab = self.browser.tab(HOME).await?;
         let path = self.category_path(&tab, &mut categories, query).await?;
-        let mut page = open(&tab, search_url(&path, query, area)?.as_str()).await?;
+        let mut page = open(&tab, search_url(&path, query, scope)?.as_str()).await?;
         // Авито мог перевести запрос в другой раздел — запоминаем, где выдача на самом деле.
         categories.remember(&self.region, query, &page.path);
 
-        if let Some(area) = area
-            && !page.has_radius(area)
-        {
-            // Авито перевёл поиск в другой раздел и по дороге выбросил радиус — повторяем уже в этом разделе.
-            page = open(&tab, search_url(&page.path, query, Some(area))?.as_str()).await?;
-            if !page.has_radius(area) {
-                return Err(anyhow!(
-                    "Авито не принял поиск в радиусе {} км от дома — проверьте город в «Настройках»",
-                    area.radius_km
-                )
-                .into());
+        if page.lost(scope).is_some() {
+            // Авито перевёл поиск в другой раздел и по дороге выбросил радиус или «Частные» — повторяем уже в нём.
+            page = open(&tab, search_url(&page.path, query, scope)?.as_str()).await?;
+            if let Some(lost) = page.lost(scope) {
+                return Err(anyhow!("Авито не принял {lost} — проверьте город в «Настройках»").into());
             }
         }
         page.into_offers()
     }
 
-    async fn search_link(&self, link: &Url, area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search_link(&self, link: &Url, scope: Scope) -> Result<Vec<Offer>, SourceError> {
         let _one_search_per_tab = self.categories.lock().await;
         let tab = self.browser.tab(HOME).await?;
-        let page = open(&tab, link_url(link, area).as_str()).await?;
-        if let Some(area) = area
-            && !page.has_radius(area)
-        {
+        let page = open(&tab, link_url(link, scope).as_str()).await?;
+        if let Some(lost) = page.lost(scope) {
             return Err(anyhow!(
-                "Авито не принял радиус {} км для этой ссылки — откройте её в браузере программы и проверьте город",
-                area.radius_km
+                "Авито не принял {lost} для этой ссылки — откройте её в браузере программы и проверьте город"
             )
             .into());
         }
@@ -165,8 +161,14 @@ impl OfferSource for Avito {
 }
 
 impl Page {
-    fn has_radius(&self, area: Area) -> bool {
-        self.radius.as_deref() == Some(area.radius_km.to_string().as_str())
+    /// Что из `scope` открытая страница потеряла — для текста ошибки; `None` — всё на месте.
+    fn lost(&self, scope: Scope) -> Option<String> {
+        if let Some(area) = scope.area
+            && self.radius.as_deref() != Some(area.radius_km.to_string().as_str())
+        {
+            return Some(format!("поиск в радиусе {} км от дома", area.radius_km));
+        }
+        (scope.private_only && self.user.as_deref() != Some(PRIVATE_SELLERS)).then(|| "фильтр «Частные»".to_string())
     }
 
     /// Объявления на странице есть, а прочитать не удалось ни одного — значит, Авито поменял устройство карточек,
@@ -193,26 +195,28 @@ impl Page {
     }
 }
 
-fn search_url(path: &str, query: &str, area: Option<Area>) -> anyhow::Result<Url> {
+fn search_url(path: &str, query: &str, scope: Scope) -> anyhow::Result<Url> {
     let mut url = Url::parse(HOME)?.join(path)?;
     url.query_pairs_mut()
         .append_pair("q", query)
         .append_pair("s", NEWEST_FIRST);
-    add_area(&mut url, area);
+    add_scope(&mut url, scope);
     Ok(url)
 }
 
 /// Фильтры, выбранные на сайте, Авито хранит в параметре `f` ссылки, и переход их не теряет. Сортировку и радиус
 /// программа ставит свои: проверяются свежие объявления в радиусе слежки. `context` и `localPriority` Авито
-/// добавляет к адресу сам, на фильтры они не влияют.
-fn link_url(link: &Url, area: Option<Area>) -> Url {
+/// добавляет к адресу сам, на фильтры они не влияют. «Частные» из ссылки остаются, даже если в слежке их нет.
+fn link_url(link: &Url, scope: Scope) -> Url {
     let kept: Vec<(String, String)> = link
         .query_pairs()
         .filter(|(key, _)| {
-            !matches!(
-                key.as_ref(),
-                "s" | "geoCoords" | "radius" | "searchRadius" | "context" | "localPriority"
-            )
+            let private_added_by_scope = key == "user" && scope.private_only;
+            !private_added_by_scope
+                && !matches!(
+                    key.as_ref(),
+                    "s" | "geoCoords" | "radius" | "searchRadius" | "context" | "localPriority"
+                )
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
@@ -221,17 +225,21 @@ fn link_url(link: &Url, area: Option<Area>) -> Url {
         .clear()
         .extend_pairs(&kept)
         .append_pair("s", NEWEST_FIRST);
-    add_area(&mut url, area);
+    add_scope(&mut url, scope);
     url
 }
 
-fn add_area(url: &mut Url, area: Option<Area>) {
-    if let Some(area) = area {
+/// Радиус — `geoCoords` и `radius` вместе (одного `radius` Авито не принимает), «Частные» — `user=1`.
+fn add_scope(url: &mut Url, scope: Scope) {
+    if let Some(area) = scope.area {
         let radius = area.radius_km.to_string();
         url.query_pairs_mut()
             .append_pair("geoCoords", &format!("{},{}", area.center.lat, area.center.lon))
             .append_pair("radius", &radius)
             .append_pair("searchRadius", &radius);
+    }
+    if scope.private_only {
+        url.query_pairs_mut().append_pair("user", PRIVATE_SELLERS);
     }
 }
 
@@ -305,6 +313,7 @@ fn leading_number(text: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::geo::GeoPoint;
+    use crate::marketplace::Area;
 
     #[test]
     fn categories_survive_restart_and_belong_to_their_city() {
@@ -382,19 +391,41 @@ mod tests {
             state: PageState::Listings,
             path: "/moskva/instrumenty".into(),
             radius: radius.map(Into::into),
+            user: None,
             cards,
         }
     }
 
     #[test]
-    fn dropped_radius_is_noticed() {
-        let near = Area {
-            center: GeoPoint { lat: 55.75, lon: 37.62 },
-            radius_km: 25,
+    fn dropped_radius_or_private_filter_is_noticed() {
+        let near = Scope {
+            area: Some(Area {
+                center: GeoPoint { lat: 55.75, lon: 37.62 },
+                radius_km: 25,
+            }),
+            private_only: false,
         };
-        assert!(page(Some("25"), Vec::new()).has_radius(near));
-        assert!(!page(None, Vec::new()).has_radius(near));
-        assert!(!page(Some("5"), Vec::new()).has_radius(near));
+        assert_eq!(page(Some("25"), Vec::new()).lost(near), None);
+        assert_eq!(
+            page(None, Vec::new()).lost(near).as_deref(),
+            Some("поиск в радиусе 25 км от дома")
+        );
+        assert!(page(Some("5"), Vec::new()).lost(near).is_some());
+
+        let private = Scope {
+            area: None,
+            private_only: true,
+        };
+        assert_eq!(
+            page(None, Vec::new()).lost(private).as_deref(),
+            Some("фильтр «Частные»")
+        );
+        let kept = Page {
+            user: Some("1".into()),
+            ..page(None, Vec::new())
+        };
+        assert_eq!(kept.lost(private), None);
+        assert_eq!(page(None, Vec::new()).lost(Scope::default()), None);
     }
 
     #[test]
@@ -432,13 +463,18 @@ mod tests {
             },
             radius_km: 25,
         };
+        let private_near = Scope {
+            area: Some(near),
+            private_only: true,
+        };
         assert_eq!(
-            search_url(path, "шуруповерт makita", Some(near)).unwrap().as_str(),
+            search_url(path, "шуруповерт makita", private_near).unwrap().as_str(),
             "https://www.avito.ru/moskva/remont_i_stroitelstvo/instrumenty/elektroinstrument/dreli_i_shurupovyorty-ASgB\
              ?q=%D1%88%D1%83%D1%80%D1%83%D0%BF%D0%BE%D0%B2%D0%B5%D1%80%D1%82+makita&s=104\
-             &geoCoords=55.751244%2C37.618423&radius=25&searchRadius=25"
+             &geoCoords=55.751244%2C37.618423&radius=25&searchRadius=25&user=1"
         );
-        assert!(!search_url(path, "дрель", None).unwrap().as_str().contains("geoCoords"));
+        let anywhere = search_url(path, "дрель", Scope::default()).unwrap();
+        assert!(!anywhere.as_str().contains("geoCoords") && !anywhere.as_str().contains("user="));
     }
 
     #[test]
@@ -456,15 +492,64 @@ mod tests {
             radius_km: 5,
         };
 
+        let nearby = Scope {
+            area: Some(near),
+            private_only: true,
+        };
         assert_eq!(
-            link_url(&link, Some(near)).as_str(),
+            link_url(&link, nearby).as_str(),
             "https://www.avito.ru/moskva/bytovaya_elektronika?f=ASgBAgICAUT4vA2W0jQ&q=logitech+g435&s=104\
-             &geoCoords=55.751244%2C37.618423&radius=5&searchRadius=5"
+             &geoCoords=55.751244%2C37.618423&radius=5&searchRadius=5&user=1"
         );
         assert_eq!(
-            link_url(&link, None).as_str(),
+            link_url(&link, Scope::default()).as_str(),
             "https://www.avito.ru/moskva/bytovaya_elektronika?f=ASgBAgICAUT4vA2W0jQ&q=logitech+g435&s=104",
             "без радиуса в слежке и радиус ссылки не нужен: рынок считается по всему городу"
+        );
+        let private_link =
+            Url::parse("https://www.avito.ru/moskva/bytovaya_elektronika?q=logitech+g435&user=1").unwrap();
+        assert_eq!(
+            link_url(&private_link, nearby).as_str().matches("user=1").count(),
+            1,
+            "«Частные» из ссылки и из слежки — один параметр"
+        );
+        assert!(
+            link_url(&private_link, Scope::default()).as_str().contains("user=1"),
+            "фильтр, выбранный на сайте, остаётся"
+        );
+    }
+
+    /// Поиск по словам Авито переводит в раздел — фильтр «Частные» должен дожить до открытой страницы.
+    /// На первой странице без фильтра магазины со значком «14 дней на возврат» шли первыми; с фильтром из 50 таких
+    /// осталось 2 — перекупы с аккаунтом частного лица («магазин «Вторые руки»», лот из 22 наушников, 29.10.2026).
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Авито: cargo test -- --ignored --test-threads=1"]
+    async fn finds_private_listings_on_live_site() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-avito-data");
+        let avito = Avito::new(crate::browser::test_browser(), "moskva", Storage::new(data));
+        let private = Scope {
+            area: None,
+            private_only: true,
+        };
+
+        let offers = avito.search("наушники logitech g435", private).await.unwrap();
+
+        assert!(offers.len() >= 10, "собрано всего {}", offers.len());
+        let shops: Vec<String> = offers
+            .iter()
+            .filter(|offer| {
+                offer
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| text.contains("дней на возврат"))
+            })
+            .map(|offer| format!("{} | {:?}", offer.url, offer.description))
+            .collect();
+        assert!(
+            shops.len() <= 5,
+            "«Частные» не отсеяли магазины — фильтр потерялся? {shops:#?}"
         );
     }
 
@@ -483,7 +568,11 @@ mod tests {
             radius_km: 5,
         };
 
-        let offers = avito.search("шуруповерт makita", Some(near)).await.unwrap();
+        let scope = Scope {
+            area: Some(near),
+            private_only: false,
+        };
+        let offers = avito.search("шуруповерт makita", scope).await.unwrap();
 
         assert!(offers.len() >= 10, "собрано всего {}", offers.len());
         assert!(

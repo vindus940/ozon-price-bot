@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::browser::{Browser, Tab};
 use crate::marketplace::page::{self, PageState, ScriptPage};
-use crate::marketplace::{Area, OfferSource, Product, SourceError};
+use crate::marketplace::{OfferSource, Product, Scope, SourceError};
 use crate::offer::Offer;
 
 const HOME: &str = "https://www.dns-shop.ru/";
@@ -70,7 +70,7 @@ impl OfferSource for Dns {
     }
 
     /// Адресов у товаров магазина нет: он везёт со склада или из своих магазинов, поэтому `area` не учитывается.
-    async fn search(&self, query: &str, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search(&self, query: &str, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
         let _exclusive = self.tab_in_use.lock().await;
         let tab = self.browser.tab(HOME).await?;
         let url = Url::parse_with_params(&format!("{HOME}search/"), &[("q", query)])
@@ -79,7 +79,7 @@ impl OfferSource for Dns {
     }
 
     /// Фильтры ДНС хранит в самом адресе каталога (бренд — частью пути подборки), поэтому ссылка открывается как есть.
-    async fn search_link(&self, link: &Url, _area: Option<Area>) -> Result<Vec<Offer>, SourceError> {
+    async fn search_link(&self, link: &Url, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
         let _exclusive = self.tab_in_use.lock().await;
         let tab = self.browser.tab(HOME).await?;
         read_pages(&tab, link.as_str()).await
@@ -418,7 +418,7 @@ mod live {
     async fn finds_offers_on_live_site() {
         let dns = Dns::new(test_browser());
 
-        let offers = dns.search("шуруповерт makita", None).await.unwrap();
+        let offers = dns.search("шуруповерт makita", Scope::default()).await.unwrap();
 
         assert!(
             offers.len() > 24,
@@ -468,7 +468,7 @@ mod live {
             .parse_link("https://www.dns-shop.ru/catalog/recipe/422f8a94ba41d693/sony/")
             .unwrap();
 
-        let offers = dns.search_link(&link, None).await.unwrap();
+        let offers = dns.search_link(&link, Scope::default()).await.unwrap();
 
         assert!(
             offers.len() > 24,
