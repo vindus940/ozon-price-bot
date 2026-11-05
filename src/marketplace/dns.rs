@@ -79,6 +79,7 @@ impl OfferSource for Dns {
         let tab = self.browser.tab(HOME).await?;
         let url = Url::parse_with_params(&format!("{HOME}search/"), &[("q", query)])
             .context("не удалось составить адрес поиска")?;
+        let _rendering = tab.keep_rendering().await?;
         page::read_pages::<Page>(&tab, url.as_str(), READ_SCRIPT, NOT_FOUND, &PAGING).await
     }
 
@@ -86,6 +87,7 @@ impl OfferSource for Dns {
     async fn search_link(&self, link: &Url, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
         let _exclusive = self.tab_in_use.lock().await;
         let tab = self.browser.tab(HOME).await?;
+        let _rendering = tab.keep_rendering().await?;
         page::read_pages::<Page>(&tab, link.as_str(), READ_SCRIPT, NOT_FOUND, &PAGING).await
     }
 

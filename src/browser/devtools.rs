@@ -100,6 +100,22 @@ impl Tab {
         Ok(())
     }
 
+    /// Пока жив результат, вкладка рисуется, как открытая перед глазами, хотя окно не показывается. Некоторые сайты
+    /// не дорисовывают скрытую вкладку: ДНС в ней показывает карточки без цен (5.11.2026). Команда действует, пока
+    /// открыто соединение, которое её послало, поэтому его и возвращаем.
+    pub async fn keep_rendering(&self) -> Result<impl Send + use<>> {
+        let (mut connection, _) = connect_async(self.socket.as_str())
+            .await
+            .context("не удалось подключиться к вкладке")?;
+        let command = json!({
+            "id": COMMAND_ID,
+            "method": "Emulation.setFocusEmulationEnabled",
+            "params": { "enabled": true },
+        });
+        connection.send(Message::Text(command.to_string().into())).await?;
+        Ok(connection)
+    }
+
     /// Открывает адрес во вкладке, как если бы его вставили в адресную строку.
     /// Возвращается, когда переход начался; дождаться загрузки — забота вызывающего.
     pub async fn navigate(&self, url: &str) -> Result<()> {

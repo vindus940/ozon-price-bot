@@ -13,6 +13,9 @@ use crate::offer::Offer;
 const PAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(700);
 const MARK_PAGE_STALE: &str = "window.__huntStale = true";
+/// Для журнала: что было на странице, которая не открылась. Без этого причину сбоя не восстановить.
+const WHAT_IS_SHOWN: &str = "({ url: location.href, title: document.title, ready: document.readyState, \
+     visibility: document.visibilityState, text: (document.body?.innerText || '').replace(/\\s+/g, ' ').slice(0, 300) })";
 
 /// Что скрипт площадки видит на открытой странице.
 #[derive(Debug, Deserialize)]
@@ -61,19 +64,22 @@ pub async fn open<P: ScriptPage>(tab: &Tab, url: &str, script: &str, not_found: 
     tab.evaluate::<bool>(MARK_PAGE_STALE).await?;
     tab.navigate(url).await?;
     let deadline = Instant::now() + PAGE_TIMEOUT;
+    let mut last_seen = "скрипт площадки ни разу не ответил".to_string();
     loop {
         sleep(POLL_INTERVAL).await;
-        if let Ok(page) = tab.evaluate::<P>(script).await
-            && !page.stale()
-        {
-            match page.state() {
-                PageState::Loading => {}
+        match tab.evaluate::<P>(script).await {
+            Ok(page) if page.stale() => "ещё старая страница".clone_into(&mut last_seen),
+            Ok(page) => match page.state() {
+                PageState::Loading => "скрипт площадки видит загрузку".clone_into(&mut last_seen),
                 PageState::Captcha => return Err(SourceError::Captcha),
                 PageState::NotFound => return Err(anyhow!("{not_found}").into()),
                 PageState::Listings => return Ok(page),
-            }
+            },
+            Err(error) => last_seen = format!("скрипт площадки не прочитан: {error:#}"),
         }
         if Instant::now() >= deadline {
+            let shown = tab.evaluate::<serde_json::Value>(WHAT_IS_SHOWN).await;
+            log::warn!("{url} не открылась: {last_seen}; на странице {shown:?}");
             return Err(SourceError::NotReady);
         }
     }
