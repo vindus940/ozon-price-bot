@@ -251,7 +251,7 @@ src/
 ├── autostart.rs         запуск при входе в Windows: файл в папке «Автозагрузка»
 ├── instance.rs          один экземпляр на папку данных: замок на data/program.lock
 ├── logs.rs              журнал в консоль и в файл logs\ГГГГ-ММ-ДД.log, старше 14 дней удаляется
-└── format.rs, text.rs, export.rs, wait.rs  рубли, нормализация текста, CSV, ожидание
+└── format.rs, text.rs, export.rs, wait.rs  рубли, нормализация текста, таблица Excel, ожидание
 ```
 
 Новая площадка — это файл рядом с `ozon.rs` с двумя методами `name()` и `search(query)` и одна строка

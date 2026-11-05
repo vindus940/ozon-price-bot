@@ -178,7 +178,13 @@ impl ChatBot {
                 for (source, error) in &findings.failed {
                     log::warn!("поиск «{}»: {} не ответил — {error:#}", request.query, source.title());
                 }
-                let table = (!findings.suitable.is_empty()).then(|| export::csv(&findings.suitable, request.per_unit));
+                let table = (!findings.suitable.is_empty())
+                    .then(|| export::xlsx(&findings.suitable, request.per_unit))
+                    .and_then(|table| {
+                        table
+                            .map_err(|error| log::warn!("таблица «{}» не собралась: {error:#}", request.query))
+                            .ok()
+                    });
                 let (text, keyboard) = {
                     let mut answers = self.answers.lock().unwrap();
                     let key = answers.add(Answer::new(request.clone(), findings));

@@ -558,7 +558,7 @@ pub(super) fn table_file_name(query: &str) -> String {
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .take(40)
         .collect();
-    format!("{slug}.csv")
+    format!("{slug}.xlsx")
 }
 
 fn offer_entry(place: usize, found: &Finding, with_source: bool, believable_old_price: Option<u64>) -> String {
