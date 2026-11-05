@@ -22,6 +22,9 @@ use crate::marketplace::ozon::Ozon;
 use crate::marketplace::{SourceError, SourceKind};
 use crate::search::{Findings, OfferSearch, SearchRequest};
 
+/// Сколько прошлых запросов показывает `/history`: дальше список не читают.
+const HISTORY_SIZE: usize = 10;
+
 const WITHOUT_LINK_PREVIEW: LinkPreviewOptions = LinkPreviewOptions {
     is_disabled: true,
     url: None,
@@ -139,6 +142,7 @@ impl ChatBot {
                     .collect();
                 render::status(self.ozon.site_status().await, &reports)
             }
+            Reply::History => render::price_history(&self.memory.recent(HISTORY_SIZE)),
             Reply::Watches => {
                 let watches: Vec<(Watch, Option<RunStatus>)> = self
                     .hunter
@@ -346,6 +350,7 @@ enum Reply {
     Help,
     Search(SearchRequest),
     Status,
+    History,
     Watches,
     Watch(WatchAction, u64),
     /// Команда слежки без номера — подсказать, где его взять.
@@ -394,6 +399,7 @@ fn command_reply(command: &str) -> Reply {
     let name = name.split('@').next().unwrap_or_default();
     let action = match name {
         "status" => return Reply::Status,
+        "history" => return Reply::History,
         "watches" => return Reply::Watches,
         "pause" => WatchAction::Pause,
         "resume" => WatchAction::Resume,
@@ -439,6 +445,7 @@ mod tests {
     fn watch_commands_take_the_number_from_the_list() {
         assert_eq!(reply("/watches", OWNER), Reply::Watches);
         assert_eq!(reply("/status", OWNER), Reply::Status);
+        assert_eq!(reply("/history", OWNER), Reply::History);
         assert_eq!(reply("/pause 3", OWNER), Reply::Watch(WatchAction::Pause, 3));
         assert_eq!(reply("/resume №3", OWNER), Reply::Watch(WatchAction::Resume, 3));
         assert_eq!(reply("/check@hunt_bot 12", OWNER), Reply::Watch(WatchAction::Check, 12));

@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Local};
@@ -35,6 +36,16 @@ pub struct PastLow {
     pub at: DateTime<Local>,
     /// С какого поиска есть история.
     pub since: DateTime<Local>,
+}
+
+/// Прошлый запрос для `/history`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchedQuery {
+    pub query: String,
+    pub source: SourceKind,
+    pub price: u64,
+    pub lowest: u64,
+    pub at: DateTime<Local>,
 }
 
 impl PastLow {
@@ -120,6 +131,33 @@ impl PriceMemory {
             log::warn!("лучшая цена не записана: {error:#}");
         }
         low
+    }
+
+    /// Последние запросы, новые первыми. Один запрос в разных категориях — одна строка.
+    pub fn recent(&self, limit: usize) -> Vec<SearchedQuery> {
+        let points = self.points.lock().unwrap();
+        let mut queries: Vec<SearchedQuery> = points
+            .0
+            .iter()
+            .filter_map(|(key, points)| {
+                let last = points.last()?;
+                Some(SearchedQuery {
+                    query: key
+                        .split_once(": ")
+                        .map_or(key.as_str(), |(_, query)| query)
+                        .to_string(),
+                    source: last.source,
+                    price: last.price,
+                    lowest: points.iter().map(|point| point.price).min()?,
+                    at: last.at,
+                })
+            })
+            .collect();
+        queries.sort_by_key(|searched| Reverse(searched.at));
+        let mut seen = HashSet::new();
+        queries.retain(|searched| seen.insert(searched.query.clone()));
+        queries.truncate(limit);
+        queries
     }
 
     #[cfg(test)]
@@ -252,6 +290,25 @@ mod tests {
             memory.note(&limited, Category::Any, SourceKind::Ozon, 2_000, day(2, 10)),
             None
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recent_queries_are_the_newest_once_each_with_their_lowest_price() {
+        let (memory, dir) = memory("recent");
+        memory.start(KEY, 3_000, SourceKind::Ozon, day(1, 10));
+        memory.start(KEY, 2_800, SourceKind::Dns, day(3, 10));
+        memory.start("Electronics: sony наушники", 2_900, SourceKind::Ozon, day(2, 10));
+        memory.start("Any: чайник", 1_500, SourceKind::Ozon, day(4, 10));
+
+        let recent = memory.recent(10);
+
+        let lines: Vec<(&str, u64, u64)> = recent
+            .iter()
+            .map(|searched| (searched.query.as_str(), searched.price, searched.lowest))
+            .collect();
+        assert_eq!(lines, [("чайник", 1_500, 1_500), ("sony наушники", 2_800, 2_800)]);
+        assert_eq!(memory.recent(1).len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 

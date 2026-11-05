@@ -45,7 +45,7 @@ pub use market::MarketPrice;
 #[cfg(test)]
 pub use market::PerUnit;
 use memory::{Notified, PriceNews};
-pub use price_memory::PriceMemory;
+pub use price_memory::{PriceMemory, SearchedQuery};
 use schedule::Schedule;
 pub use schedule::{Outcome, Pause, RunStatus, SourceReport};
 pub use trial::TrialStatus;

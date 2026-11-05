@@ -5,7 +5,8 @@ use super::buttons::{Press, deal_key};
 use crate::format::{capitalized, price_drop, rub, same_model, signed_rub, source_price, tile_marks};
 use crate::health::{Health, Problem};
 use crate::hunt::{
-    Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SourceReport, Watch, same_model_groups,
+    Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SearchedQuery, SourceReport, Watch,
+    same_model_groups,
 };
 use crate::marketplace::{Product, SiteStatus, SourceError, SourceKind};
 use crate::offer::Offer;
@@ -56,13 +57,15 @@ pub(super) const HELP: &str = "Напишите, что ищете, — приш
 Слежками можно управлять отсюда:
 /watches — список с номерами и итогами проверок
 <code>/pause 3</code> — пауза, <code>/resume 3</code> — снова следить, <code>/check 3</code> — проверить сейчас
-/status — открыт ли браузер программы и когда площадки последний раз отвечали";
+/status — открыт ли браузер программы и когда площадки последний раз отвечали
+/history — что вы искали и какие были цены";
 
 /// Меню команд у поля ввода в Telegram.
 pub(super) fn commands() -> Vec<BotCommand> {
     [
         ("watches", "Слежки: номера и итоги проверок"),
         ("status", "Браузер и площадки: всё ли работает"),
+        ("history", "Что вы искали и какие были цены"),
         ("pause", "Пауза слежки: /pause 3"),
         ("resume", "Снова следить: /resume 3"),
         ("check", "Проверить сейчас: /check 3"),
@@ -71,6 +74,28 @@ pub(super) fn commands() -> Vec<BotCommand> {
     .into_iter()
     .map(|(command, description)| BotCommand::new(command, description))
     .collect()
+}
+
+/// Прошлые запросы для `/history`. Запрос — кодом: Telegram копирует его нажатием, чтобы спросить снова.
+pub(super) fn price_history(queries: &[SearchedQuery]) -> String {
+    if queries.is_empty() {
+        return "Истории пока нет: напишите, что ищете. Запросы с условиями вроде «до 5000» в неё не попадают."
+            .to_string();
+    }
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|searched| {
+            format!(
+                "<code>{}</code>\n{} — {} {}, самая низкая {}",
+                escape(&searched.query),
+                searched.at.format("%d.%m"),
+                searched.source.title(),
+                rub(searched.price),
+                rub(searched.lowest),
+            )
+        })
+        .collect();
+    format!("🕘 Что вы искали, за 30 дней:\n\n{}", entries.join("\n\n"))
 }
 
 /// Список слежек для `/watches`: номер — для команд, состояние и итог последней проверки. Сколько влезает
@@ -1475,7 +1500,26 @@ mod tests {
             which_watch(WatchAction::Check),
             "Напишите номер слежки: /check 3. Номера — в /watches."
         );
-        assert_eq!(commands().len(), 6);
+        assert_eq!(commands().len(), 7);
+    }
+
+    #[test]
+    fn history_lists_queries_ready_to_copy_or_says_there_are_none() {
+        assert!(price_history(&[]).starts_with("Истории пока нет"));
+
+        let text = price_history(&[SearchedQuery {
+            query: "sony наушники".into(),
+            source: SourceKind::Wildberries,
+            price: 3_000,
+            lowest: 2_500,
+            at: Local.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap(),
+        }]);
+
+        assert!(text.contains("<code>sony наушники</code>"), "{text}");
+        assert!(
+            text.contains("05.11 — Wildberries 3\u{a0}000\u{a0}₽, самая низкая 2\u{a0}500\u{a0}₽"),
+            "{text}"
+        );
     }
 
     #[test]
