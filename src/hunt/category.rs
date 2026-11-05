@@ -256,9 +256,18 @@ fn is_bundle(query_words: &[String], title: &str) -> bool {
 /// «Руль … (для Xbox Series X/S)», «Аккумулятор … для GOPRO HERO 13»: искомое названо сразу после «для» —
 /// значит, это вещь для него, в любой категории. «Фен для волос Dyson» — сам фен: после «для» идёт не запрос;
 /// «Чехол для iPhone» по запросу «чехол iphone» — сам чехол: «чехол» из запроса стоит раньше «для».
+/// Между «для» и искомым бывает определение: «Скоба для беспроводных наушников Sony».
 fn made_for(query: &str, title_words: &[String]) -> bool {
-    first_mention(title_words, query).is_some_and(|first| title_words[..first].last().is_some_and(|word| word == "для"))
+    first_mention(title_words, query).is_some_and(|first| match title_words[..first] {
+        [.., ref last] if last == "для" => true,
+        [.., ref before, ref last] => before == "для" && ADJECTIVE_ENDINGS.iter().any(|ending| last.ends_with(ending)),
+        _ => false,
+    })
 }
+
+/// Окончания определения в родительном падеже: «беспроводных», «игрового». «Телефона» сюда не подходит: «Наушники для
+/// телефона Sony» по запросу «sony» — сами наушники.
+const ADJECTIVE_ENDINGS: &[&str] = &["ых", "их", "ого", "его", "ой", "ей"];
 
 #[cfg(test)]
 mod tests {
@@ -407,6 +416,18 @@ mod tests {
             "rtx 5060",
             "Palit Видеокарта GeForce RTX 5060 Ti Dual OC 8 ГБ (NE7506TT19P1-GB2062D)"
         ));
+    }
+
+    #[test]
+    fn thing_for_a_described_product_is_another_product() {
+        let any = |query: &str, title: &str| Category::Any.is_comparable(query, title);
+
+        assert!(!any(
+            "наушники sony wh-ch520",
+            "Шарнирно-поворотная скоба подходящего размера для беспроводных наушников Sony WH-CH520"
+        ));
+        assert!(any("sony", "Наушники для телефона Sony"));
+        assert!(any("фен dyson", "Фен для сухих волос Dyson"));
     }
 
     #[test]

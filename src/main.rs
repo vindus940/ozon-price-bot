@@ -1,3 +1,7 @@
+// Без этого при автозапуске рядом с окном висела бы консоль, закрытие которой закрывает и программу.
+// Журнал всё равно пишется в файл, а отладочная сборка консоль сохраняет.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod autostart;
 mod browser;
 mod config;
