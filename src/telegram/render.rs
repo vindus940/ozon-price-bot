@@ -753,7 +753,7 @@ fn goal_summary(watch: &Watch) -> String {
         .radius_km
         .map(|radius| format!(", до {radius} км от дома"))
         .unwrap_or_default();
-    format!("{}, {goal}{radius}", watch.source.title())
+    format!("{}, {goal}{radius}", watch.sources_title())
 }
 
 /// Сколько находок влезает в одно сообщение — столько и показываем, остальные ждут в программе.

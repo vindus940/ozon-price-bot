@@ -476,9 +476,44 @@ impl Hunter {
                 .map(Found::Product)
                 .map_err(CheckError::Source);
         }
-        let offers = self.search(watch, source.as_ref()).await?;
+        let mut offers = self.search(watch, source.as_ref()).await?;
+        offers.extend(self.other_shops(watch).await);
         let cheapest = self.cheapest(watch, source.as_ref(), &offers).await;
         Ok(Found::Offers { offers, cheapest })
+    }
+
+    /// Ещё магазины слежки. Не ответивший магазин слежку не роняет: она проверяет остальные, а причина — в журнале.
+    /// Проверку «я не робот» площадка помнит, как и у основного магазина: на паузе туда не заходим.
+    async fn other_shops(&self, watch: &Watch) -> Vec<Offer> {
+        let mut offers = Vec::new();
+        for &kind in &watch.also_sources {
+            if self.state().schedule.pause(kind, Local::now()).is_some() {
+                continue;
+            }
+            let Ok(source) = self.source(kind) else {
+                continue;
+            };
+            let scope = watch.scope(self.state().home);
+            match source.search(&watch.query, scope).await {
+                Ok(found) => {
+                    self.state().schedule.source_answered(kind);
+                    offers.extend(found);
+                }
+                Err(error) => {
+                    let mut state = self.state();
+                    if matches!(error, SourceError::Captcha) {
+                        state.schedule.captcha(kind, Local::now());
+                    }
+                    state.journal.write(format!(
+                        "«{}»: {} не ответил, проверено без него — {}",
+                        watch.name,
+                        kind.title(),
+                        failure_reason(kind, &error)
+                    ));
+                }
+            }
+        }
+        offers
     }
 
     /// Вторая выдача — от дешёвых к дорогим в коридоре цен вокруг рынка (2.7): самое дешёвое бывает далеко от начала
@@ -1166,6 +1201,77 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(MarketPrice::Whole(3_300), MarketPrice::Whole(3_300))],
             "точка в час: последняя цена, «нет в продаже» историю не трогает"
+        );
+    }
+
+    fn hunter_of_two_shops(
+        ozon: &Arc<ChangingSource>,
+        wildberries: &Arc<ChangingSource>,
+        notifier: &Arc<RecordingNotifier>,
+        storage: &Storage,
+    ) -> Hunter {
+        Hunter::new(
+            HashMap::from([
+                (SourceKind::Ozon, Arc::clone(ozon) as Arc<dyn OfferSource>),
+                (SourceKind::Wildberries, Arc::clone(wildberries) as Arc<dyn OfferSource>),
+            ]),
+            Some(Arc::clone(notifier) as Arc<dyn Notifier>),
+            storage.clone(),
+            None,
+        )
+    }
+
+    fn in_two_shops() -> Watch {
+        Watch {
+            also_sources: vec![SourceKind::Wildberries],
+            ..iphone_watch()
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_of_several_shops_finds_a_deal_in_the_second_one_against_the_common_market() {
+        let ozon = ChangingSource::with(market_offers());
+        let wildberries = ChangingSource::with(vec![phone(58_000), phone(76_000)]);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("two-shops");
+        let hunter = hunter_of_two_shops(&ozon, &wildberries, &notifier, &storage);
+        let id = hunter.save_watch(in_two_shops()).unwrap();
+
+        hunter.check(id).await;
+
+        assert_eq!(hunter.deals()[0].offer.price, 58_000);
+        assert!(matches!(
+            hunter.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Checked {
+                market: Some(MarketPrice::Whole(72_500 | 72_000 | 73_000)),
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn silent_second_shop_does_not_fail_the_watch_and_rests_after_a_captcha() {
+        let ozon = ChangingSource::with(market_offers());
+        ozon.offers.lock().unwrap().push(phone(58_000));
+        let wildberries = ChangingSource::with(Vec::new());
+        wildberries.captcha.store(true, Ordering::SeqCst);
+        let notifier = Arc::new(RecordingNotifier::default());
+        let storage = storage("two-shops-captcha");
+        let hunter = hunter_of_two_shops(&ozon, &wildberries, &notifier, &storage);
+        let id = hunter.save_watch(in_two_shops()).unwrap();
+
+        hunter.check(id).await;
+        hunter.check(id).await;
+
+        assert_eq!(hunter.deals()[0].offer.price, 58_000);
+        assert!(matches!(
+            hunter.run_status(id).map(|run| run.outcome),
+            Some(Outcome::Checked { .. })
+        ));
+        assert_eq!(
+            wildberries.scopes.lock().unwrap().len(),
+            1,
+            "на паузе площадку не трогаем"
         );
     }
 

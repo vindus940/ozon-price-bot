@@ -54,6 +54,7 @@ pub(super) struct WatchForm {
     shop: ShopConditions,
     new_only: bool,
     sellers: Sellers,
+    also_sources: Vec<SourceKind>,
     every_minutes: u32,
     hours: Option<Hours>,
     pub(super) problems: Vec<String>,
@@ -97,6 +98,7 @@ impl WatchForm {
             shop: watch.shop,
             new_only: watch.new_only,
             sellers: watch.sellers,
+            also_sources: watch.also_sources.clone(),
             every_minutes: watch.every_minutes,
             hours: watch.hours,
             problems: Vec::new(),
@@ -129,6 +131,7 @@ impl WatchForm {
                 } else {
                     self.what_we_look_for(ui);
                     self.filters(ui);
+                    self.other_shops(ui);
                 }
                 self.schedule(ui);
             });
@@ -249,6 +252,37 @@ impl WatchForm {
                     }
                 });
             ui.weak(self.category.hint());
+        });
+        ui.end_row();
+    }
+
+    fn can_search_several(&self) -> bool {
+        Watch::can_search_several(self.goal == GoalKind::BelowMarket, self.source, &self.link)
+    }
+
+    fn other_shops(&mut self, ui: &mut egui::Ui) {
+        if !self.can_search_several() {
+            return;
+        }
+        ui.label("Ещё магазины");
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                for shop in SourceKind::ALL {
+                    if shop == self.source || shop.has_used_goods() {
+                        continue;
+                    }
+                    let mut chosen = self.also_sources.contains(&shop);
+                    if ui.checkbox(&mut chosen, shop.title()).changed() {
+                        self.also_sources.retain(|other| *other != shop);
+                        if chosen {
+                            self.also_sources.push(shop);
+                        }
+                    }
+                }
+            });
+            ui.weak(
+                "Рынок и находки по всем отмеченным сразу. Заходов на сайты больше, а частота — как у самого строгого.",
+            );
         });
         ui.end_row();
     }
@@ -508,6 +542,12 @@ impl WatchForm {
             } else {
                 Sellers::Any
             },
+            also_sources: if self.can_search_several() {
+                let main = self.source;
+                self.also_sources.iter().copied().filter(|shop| *shop != main).collect()
+            } else {
+                Vec::new()
+            },
             every_minutes: self.every_minutes,
             hours: self.hours,
             enabled: self.enabled,
@@ -576,6 +616,7 @@ mod tests {
             shop: ShopConditions::default(),
             new_only: true,
             sellers: Sellers::Private,
+            also_sources: Vec::new(),
             every_minutes: 20,
             hours: Some(Hours { from: 22, to: 7 }),
             enabled: false,
@@ -640,6 +681,28 @@ mod tests {
 
         form.source = SourceKind::Avito;
         assert_eq!(form.to_watch().unwrap().shop, ShopConditions::default());
+    }
+
+    #[test]
+    fn other_shops_stay_only_where_a_watch_can_search_several() {
+        let two_shops = Watch {
+            name: "Наушники".into(),
+            query: "наушники sony".into(),
+            also_sources: vec![SourceKind::Wildberries, SourceKind::Dns],
+            ..Watch::new_draft()
+        };
+        let mut form = WatchForm::edit(&two_shops);
+        assert_eq!(form.to_watch().unwrap().also_sources, two_shops.also_sources);
+
+        form.source = SourceKind::Wildberries;
+        assert_eq!(
+            form.to_watch().unwrap().also_sources,
+            [SourceKind::Dns],
+            "основной магазин вторым не считается"
+        );
+
+        form.link = "https://www.wildberries.ru/catalog/0/search.aspx?search=sony".into();
+        assert!(form.to_watch().unwrap().also_sources.is_empty(), "у ссылки свой сайт");
     }
 
     #[test]

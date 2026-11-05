@@ -57,7 +57,7 @@ fn card(
             };
             ui.weak(format!(
                 "{}{category} · {}",
-                watch.source.title(),
+                watch.sources_title(),
                 goal_summary(watch.goal, watch.source)
             ));
         });

@@ -95,6 +95,11 @@ pub struct Watch {
     /// считается по частным: с ними и придётся торговаться, и им же — продавать.
     #[serde(default)]
     pub sellers: Sellers,
+    /// Ещё магазины, кроме `source`: рынок и находки по всем сразу. Только для «ниже рынка» по запросу:
+    /// у ссылки свой сайт, а объявления Авито с ценами магазинов не сравниваются. Не ответил такой магазин —
+    /// слежка проверяет остальные и не считается упавшей.
+    #[serde(default)]
+    pub also_sources: Vec<SourceKind>,
     pub every_minutes: u32,
     /// Когда проверять; `None` — круглосуточно (так читаются и слежки, сохранённые до появления часов).
     /// «Проверить сейчас» и пробная проверка работают в любое время.
@@ -144,10 +149,23 @@ impl Watch {
             shop: ShopConditions::default(),
             new_only: false,
             sellers: Sellers::Any,
+            also_sources: Vec::new(),
             every_minutes: 15,
             hours: None,
             enabled: true,
         }
+    }
+
+    /// Где ищет слежка, для текста: «Ozon» или «Ozon, Wildberries».
+    pub fn sources_title(&self) -> String {
+        let mut titles = vec![self.source.title()];
+        titles.extend(self.also_sources.iter().map(|source| source.title()));
+        titles.join(", ")
+    }
+
+    /// Можно ли у этой слежки искать ещё и в других магазинах.
+    pub fn can_search_several(goal_is_below_market: bool, source: SourceKind, link: &str) -> bool {
+        goal_is_below_market && !source.has_used_goods() && link.trim().is_empty()
     }
 
     /// Что не так в настройках слежки — пустой список, если всё в порядке.
@@ -185,12 +203,28 @@ impl Watch {
                 problems.push("Часы — от 0 до 23".to_string());
             }
         }
-        if self.every_minutes < self.source.min_interval_minutes() {
+        let strictest = std::iter::once(self.source)
+            .chain(self.also_sources.iter().copied())
+            .max_by_key(|source| source.min_interval_minutes())
+            .unwrap_or(self.source);
+        if self.every_minutes < strictest.min_interval_minutes() {
             problems.push(format!(
                 "{} лучше проверять не чаще раза в {} минут — иначе начнутся проверки «я не робот»",
-                self.source.title(),
-                self.source.min_interval_minutes()
+                strictest.title(),
+                strictest.min_interval_minutes()
             ));
+        }
+        let below_market = matches!(self.goal, Goal::BelowMarket { .. });
+        let link = self.link.as_deref().unwrap_or_default();
+        if !self.also_sources.is_empty() && !Self::can_search_several(below_market, self.source, link) {
+            problems.push("Несколько магазинов — только для слежки «ниже рынка» по запросу, без ссылки".to_string());
+        }
+        if self
+            .also_sources
+            .iter()
+            .any(|source| *source == self.source || source.has_used_goods())
+        {
+            problems.push("Ещё магазины — другие магазины, кроме основного; Авито сюда не подходит".to_string());
         }
         if matches!(self.goal, Goal::Resale { .. }) && self.radius_km.is_none() {
             problems.push(if self.source.has_locations() {
@@ -287,6 +321,7 @@ impl Watch {
             };
             (
                 watch.source,
+                watch.also_sources.clone(),
                 watch.category,
                 watch.query.clone(),
                 watch.link.clone(),
@@ -383,6 +418,44 @@ mod tests {
 
         let powder = Watch::for_request(&SearchRequest::parse("стиральный порошок за кг"));
         assert_eq!(powder.category, Category::Consumables);
+    }
+
+    #[test]
+    fn several_shops_keep_to_the_strictest_interval_and_only_below_market_by_query() {
+        let in_shops = |also_sources: Vec<SourceKind>, every_minutes| Watch {
+            name: "Наушники".into(),
+            query: "наушники sony".into(),
+            also_sources,
+            every_minutes,
+            ..Watch::new_draft()
+        };
+
+        assert!(in_shops(vec![SourceKind::Wildberries], 15).problems(false).is_empty());
+        let too_often = in_shops(vec![SourceKind::YandexMarket], 15).problems(false);
+        assert!(too_often[0].contains("Яндекс Маркет"), "{too_often:?}");
+        assert!(!in_shops(vec![SourceKind::Avito], 15).problems(false).is_empty());
+        assert!(!in_shops(vec![SourceKind::Ozon], 15).problems(false).is_empty());
+        let with_link = Watch {
+            link: Some("https://www.ozon.ru/search/?text=sony".into()),
+            ..in_shops(vec![SourceKind::Dns], 15)
+        };
+        assert!(!with_link.problems(false).is_empty());
+    }
+
+    #[test]
+    fn another_set_of_shops_is_another_market_and_old_watches_have_one_shop() {
+        let one_shop = Watch::new_draft();
+        let two_shops = Watch {
+            also_sources: vec![SourceKind::Dns],
+            ..Watch::new_draft()
+        };
+        assert!(!one_shop.same_market(&two_shops));
+        assert_eq!(two_shops.sources_title(), "Ozon, ДНС");
+
+        let mut saved = serde_json::to_value(&one_shop).unwrap();
+        saved.as_object_mut().unwrap().remove("also_sources");
+        let read: Watch = serde_json::from_value(saved).unwrap();
+        assert!(read.also_sources.is_empty());
     }
 
     fn drill_for_resale() -> Watch {
