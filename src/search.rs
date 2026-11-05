@@ -31,6 +31,7 @@ pub struct OfferSearch {
     patience: Duration,
 }
 
+#[derive(Default)]
 pub struct Findings {
     pub scanned: usize,
     /// Подходящие под запрос в заказанном порядке (по умолчанию от дешёвых к дорогим). Если просили цену
@@ -76,6 +77,10 @@ impl OfferSearch {
         self.sources
             .iter()
             .filter(|(kind, _)| !request.shop.only_ozon || kind.has_marketplace_seller())
+    }
+
+    pub fn kinds(&self, request: &SearchRequest) -> Vec<SourceKind> {
+        self.asked(request).map(|(kind, _)| *kind).collect()
     }
 
     pub fn source_names(&self, request: &SearchRequest) -> Vec<&'static str> {

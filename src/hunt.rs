@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 
 use assess::assess;
 pub use assess::{Assessment, Sifted};
-pub use best_price::{BestPrices, PricedOffer, hunt_best_prices};
+pub use best_price::{BestPrices, PriceProgress, PricedOffer, hunt_best_prices};
 use book::WatchBook;
 pub use category::Category;
 pub use deal::{Deal, Miss};

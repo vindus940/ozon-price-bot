@@ -4,7 +4,7 @@ use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD, WARN};
 use crate::format::{rub, tile_marks};
-use crate::hunt::{BestPrices, Category, PricedOffer, failure_reason, hunt_best_prices};
+use crate::hunt::{BestPrices, Category, PriceProgress, PricedOffer, failure_reason, hunt_best_prices};
 use crate::marketplace::SourceKind;
 use crate::search::{OfferSearch, SearchRequest};
 
@@ -12,7 +12,10 @@ const QUERY_HINT: &str = "Например: наушники sony wh-ch520 до 
 
 enum Search {
     Idle,
-    Running(Vec<&'static str>),
+    Running {
+        waiting: Vec<&'static str>,
+        found: Option<BestPrices>,
+    },
     Done(BestPrices),
     Failed(String),
 }
@@ -45,7 +48,7 @@ impl PriceSearchTab {
         ui.heading("Поиск цены");
         ui.label("Где сейчас дешевле всего: один запрос сразу на всех площадках.");
         ui.add_space(6.0);
-        let running = matches!(*self.state.lock().unwrap(), Search::Running(_));
+        let running = matches!(*self.state.lock().unwrap(), Search::Running { .. });
         self.controls(ui, running);
         ui.add_space(8.0);
         ui.separator();
@@ -53,14 +56,14 @@ impl PriceSearchTab {
             Search::Idle => {
                 ui.weak("Пишите как боту: слова товара, «до 5000», «-чехол», «рейтинг от 4.5». Чем точнее модель, тем честнее сравнение.");
             }
-            Search::Running(sources) => {
+            Search::Running { waiting, found } => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(format!(
-                        "Спрашиваю: {}. Сначала популярное, потом от дешёвых — обычно это одна-две минуты.",
-                        sources.join(", ")
-                    ));
+                    ui.label(waiting_line(waiting));
                 });
+                if let Some(prices) = found {
+                    results(ui, prices);
+                }
             }
             Search::Failed(reason) => {
                 ui.colored_label(BAD, reason);
@@ -113,15 +116,32 @@ impl PriceSearchTab {
             return;
         }
         let search = self.search.only(&chosen);
-        *self.state.lock().unwrap() = Search::Running(search.source_names(&request));
+        *self.state.lock().unwrap() = Search::Running {
+            waiting: search.source_names(&request),
+            found: None,
+        };
         let (state, category, new_only) = (Arc::clone(&self.state), self.category, self.new_only);
         self.runtime.spawn(async move {
-            let finished = match hunt_best_prices(&search, &request, category, new_only).await {
+            let report = |progress: PriceProgress| {
+                *state.lock().unwrap() = Search::Running {
+                    waiting: progress.waiting.iter().map(|source| source.title()).collect(),
+                    found: Some(progress.prices),
+                };
+            };
+            let finished = match hunt_best_prices(&search, &request, category, new_only, &report).await {
                 Ok(prices) => Search::Done(prices),
                 Err((source, error)) => Search::Failed(failure_reason(source, &error)),
             };
             *state.lock().unwrap() = finished;
         });
+    }
+}
+
+fn waiting_line(waiting: &[&str]) -> String {
+    if waiting.is_empty() {
+        "Первые ответы есть, смотрю выдачу от дешёвых…".to_string()
+    } else {
+        format!("Жду: {}", waiting.join(", "))
     }
 }
 
@@ -255,6 +275,12 @@ mod tests {
         assert!(problem(&SearchRequest::parse("до 5000"), &all).is_some());
         assert!(problem(&SearchRequest::parse("наушники"), &[]).is_some());
         assert!(problem(&SearchRequest::parse("наушники"), &all).is_none());
+    }
+
+    #[test]
+    fn status_names_who_is_still_silent() {
+        assert_eq!(waiting_line(&["Ozon", "ДНС"]), "Жду: Ozon, ДНС");
+        assert!(waiting_line(&[]).contains("от дешёвых"));
     }
 
     #[test]

@@ -107,6 +107,11 @@ impl SourceKind {
         self == SourceKind::YandexMarket
     }
 
+    /// ДНС теряет сортировку при переводе поиска в каталог (`OfferSource::search_cheapest`): спрашивать его незачем.
+    pub fn reads_cheapest_first(self) -> bool {
+        self != SourceKind::Dns
+    }
+
     /// Б/у продают частники на Авито; магазины продают новое.
     pub fn has_used_goods(self) -> bool {
         self == SourceKind::Avito
