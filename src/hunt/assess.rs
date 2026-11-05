@@ -180,14 +180,15 @@ fn same_product(watch: &Watch, offers: Vec<Offer>, sifted: &mut Sifted) -> Vec<O
 /// Такие считаются за одно, иначе один продавец задаёт «рыночную» цену и шлёт пачку одинаковых уведомлений.
 fn without_copies(offers: impl Iterator<Item = Offer>) -> Vec<Offer> {
     let mut seen = HashSet::new();
-    offers
-        .filter(|offer| {
-            offer
-                .place
-                .as_ref()
-                .is_none_or(|place| seen.insert((offer.price, place.clone())))
-        })
-        .collect()
+    offers.filter(|offer| !is_copy(&mut seen, offer)).collect()
+}
+
+/// Уже было такое же: та же цена в том же месте. Без адреса предложения разные — это магазины.
+pub(super) fn is_copy(seen: &mut HashSet<(u64, String)>, offer: &Offer) -> bool {
+    offer
+        .place
+        .as_ref()
+        .is_some_and(|place| !seen.insert((offer.price, place.clone())))
 }
 
 #[cfg(test)]

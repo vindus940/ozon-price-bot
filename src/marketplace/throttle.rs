@@ -57,6 +57,11 @@ impl OfferSource for Throttled {
         self.wait_turn().await;
         self.inner.product(link).await
     }
+
+    async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
+        self.wait_turn().await;
+        self.inner.search_cheapest(query, from, to).await
+    }
 }
 
 fn delay_before(last_start: Option<Instant>, now: Instant, gap: Duration) -> Duration {

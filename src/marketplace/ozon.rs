@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::browser::{Browser, Tab};
-use crate::marketplace::{OfferSource, Product, Scope, SiteStatus, SourceError};
+use crate::marketplace::{OfferSource, Product, Scope, SiteStatus, SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::wait;
 
@@ -119,6 +119,13 @@ impl OfferSource for Ozon {
             None => link.path().to_string(),
         };
         self.scan(&self.scan_expression("", Some(&path))?).await
+    }
+
+    async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
+        match SourceKind::Ozon.cheapest_first(query, None, from, to) {
+            Some(link) => self.search_link(&link, Scope::default()).await,
+            None => Ok(Vec::new()),
+        }
     }
 
     async fn product(&self, link: &Url) -> Result<Product, SourceError> {

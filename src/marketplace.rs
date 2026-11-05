@@ -101,6 +101,12 @@ impl SourceKind {
         self == SourceKind::Ozon
     }
 
+    /// Каждый лишний переход приближает проверку «я не робот», поэтому поиск цены идёт сюда один раз и сразу
+    /// за дешёвым: коридор цен ему дают остальные площадки.
+    pub fn is_asked_once(self) -> bool {
+        self == SourceKind::YandexMarket
+    }
+
     /// Б/у продают частники на Авито; магазины продают новое.
     pub fn has_used_goods(self) -> bool {
         self == SourceKind::Avito
@@ -277,6 +283,13 @@ pub trait OfferSource: Send + Sync {
 
     /// Цена одного товара по ссылке на его страницу (`SourceKind::parse_product_link`).
     async fn product(&self, link: &Url) -> Result<Product, SourceError>;
+
+    /// Выдача от дешёвых к дорогим в коридоре цен: самое дешёвое бывает далеко от начала популярной выдачи.
+    /// Пусто — площадка так не умеет: ДНС теряет сортировку при переводе поиска в каталог (5.11.2026),
+    /// зато на точном запросе и так читается весь его список.
+    async fn search_cheapest(&self, _query: &str, _from: u64, _to: u64) -> Result<Vec<Offer>, SourceError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -292,6 +305,7 @@ pub mod testing {
     /// Площадка для тестов: отдаёт заданные предложения или просит проверку «я не робот» и запоминает запросы.
     pub struct FakeSource {
         offers: Option<Vec<Offer>>,
+        cheapest: Vec<Offer>,
         queries: Arc<Mutex<Vec<String>>>,
     }
 
@@ -299,6 +313,7 @@ pub mod testing {
         pub fn returning(offers: Vec<Offer>) -> Self {
             Self {
                 offers: Some(offers),
+                cheapest: Vec::new(),
                 queries: Arc::default(),
             }
         }
@@ -306,8 +321,14 @@ pub mod testing {
         pub fn asking_captcha() -> Self {
             Self {
                 offers: None,
+                cheapest: Vec::new(),
                 queries: Arc::default(),
             }
+        }
+
+        /// То, что лежит глубже популярной выдачи и находится только от дешёвых.
+        pub fn with_cheapest(self, cheapest: Vec<Offer>) -> Self {
+            Self { cheapest, ..self }
         }
 
         pub fn queries(&self) -> Arc<Mutex<Vec<String>>> {
@@ -328,6 +349,12 @@ pub mod testing {
 
         async fn search_link(&self, link: &Url, scope: Scope) -> Result<Vec<Offer>, SourceError> {
             self.search(link.as_str(), scope).await
+        }
+
+        async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
+            self.queries.lock().unwrap().push(format!("{query} {from}..{to}"));
+            self.offers.as_ref().ok_or(SourceError::Captcha)?;
+            Ok(self.cheapest.clone())
         }
 
         async fn product(&self, link: &Url) -> Result<Product, SourceError> {

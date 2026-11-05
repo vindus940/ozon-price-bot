@@ -1,4 +1,5 @@
 mod assess;
+mod best_price;
 mod book;
 mod category;
 mod deal;
@@ -24,6 +25,7 @@ use tokio::sync::Notify;
 
 use assess::assess;
 pub use assess::{Assessment, Sifted};
+pub use best_price::{BestPrices, PricedOffer, hunt_best_prices};
 use book::WatchBook;
 pub use category::Category;
 pub use deal::{Deal, Miss};
@@ -799,7 +801,7 @@ fn pause_note(source: SourceKind, pause: Pause) -> String {
     }
 }
 
-fn failure_reason(source: SourceKind, error: &SourceError) -> String {
+pub fn failure_reason(source: SourceKind, error: &SourceError) -> String {
     match error {
         SourceError::Captcha => format!(
             "{} просит подтвердить, что вы не робот — пройдите проверку в окне браузера программы",

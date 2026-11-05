@@ -158,6 +158,28 @@ impl OfferSource for Avito {
     async fn product(&self, _link: &Url) -> Result<Product, SourceError> {
         Err(anyhow!("Авито: за ценой одного объявления программа не следит — только за товарами Ozon и ДНС").into())
     }
+
+    async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
+        let _one_search_per_tab = self.categories.lock().await;
+        let tab = self.browser.tab(HOME).await?;
+        open(&tab, cheapest_url(&self.region, query, from, to)?.as_str())
+            .await?
+            .into_offers()
+    }
+}
+
+/// `s=1` — от дешёвых, `pmin` и `pmax` — коридор цен; переводя поиск в раздел, Авито их сохраняет (5.11.2026).
+fn cheapest_url(region: &str, query: &str, from: u64, to: u64) -> anyhow::Result<Url> {
+    Url::parse_with_params(
+        &format!("{HOME}{region}"),
+        &[
+            ("q", query),
+            ("s", "1"),
+            ("pmin", &from.to_string()),
+            ("pmax", &to.to_string()),
+        ],
+    )
+    .context("не удалось составить адрес поиска")
 }
 
 impl Page {
@@ -451,6 +473,14 @@ mod tests {
             .into_offers()
             .unwrap();
         assert_eq!(offers.iter().map(|offer| offer.price).collect::<Vec<_>>(), [3510]);
+    }
+
+    #[test]
+    fn cheapest_first_sorts_by_price_within_the_corridor_of_the_region() {
+        assert_eq!(
+            cheapest_url("moskva", "sony", 2_000, 4_000).unwrap().as_str(),
+            "https://www.avito.ru/moskva?q=sony&s=1&pmin=2000&pmax=4000"
+        );
     }
 
     #[test]

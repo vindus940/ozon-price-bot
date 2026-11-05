@@ -81,6 +81,23 @@ impl OfferSource for Wildberries {
     async fn product(&self, _link: &Url) -> Result<Product, SourceError> {
         Err(anyhow!("Wildberries: за ценой одного товара программа пока не следит — только Ozon и ДНС").into())
     }
+
+    async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
+        self.search_link(&cheapest_url(query, from, to)?, Scope::default())
+            .await
+    }
+}
+
+/// `sort=priceup` — от дешёвых, `priceU` — коридор в копейках через точку с запятой, не закодированной (5.11.2026).
+fn cheapest_url(query: &str, from: u64, to: u64) -> anyhow::Result<Url> {
+    let mut url = Url::parse_with_params(
+        &format!("{HOME}catalog/0/search.aspx"),
+        &[("search", query), ("sort", "priceup")],
+    )
+    .context("не удалось составить адрес поиска")?;
+    let params = format!("{}&priceU={}00;{}00", url.query().unwrap_or_default(), from, to);
+    url.set_query(Some(&params));
+    Ok(url)
 }
 
 impl ScriptPage for Page {
@@ -156,6 +173,14 @@ mod tests {
             reviews: Some("· 196 оценок".into()),
             delivery: Some("1 ноября".into()),
         }
+    }
+
+    #[test]
+    fn cheapest_first_sorts_by_price_within_the_corridor_in_kopecks() {
+        assert_eq!(
+            cheapest_url("sony wh", 2_000, 4_000).unwrap().as_str(),
+            "https://www.wildberries.ru/catalog/0/search.aspx?search=sony+wh&sort=priceup&priceU=200000;400000"
+        );
     }
 
     #[test]

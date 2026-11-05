@@ -25,6 +25,7 @@ const PAGING: Paging = Paging {
     pages: 3,
     number_key: "p",
     pause: Duration::from_secs(3),
+    full_page: 24,
 };
 
 /// Магазин ДНС. Поиск он сам переводит в каталог нужной категории («шуруповерт makita» → «Шуруповерты»),

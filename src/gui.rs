@@ -1,6 +1,7 @@
 mod deals;
 mod history;
 mod journal;
+mod price_search;
 mod settings_tab;
 mod trial;
 mod watch_form;
@@ -13,8 +14,10 @@ use anyhow::{Result, anyhow};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::hunt::Hunter;
+use crate::search::OfferSearch;
 use crate::settings::UserSettings;
 use crate::storage::Storage;
+use price_search::PriceSearchTab;
 use settings_tab::SettingsTab;
 use watch_form::{FormAction, WatchForm};
 
@@ -27,6 +30,7 @@ const BAD: Color32 = Color32::from_rgb(0xd9, 0x36, 0x36);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
+    PriceSearch,
     Watches,
     Deals,
     Settings,
@@ -41,11 +45,13 @@ struct HunterApp {
     deals_filter: Option<u64>,
     confirm_clear_deals: bool,
     dismissed: Option<deals::DismissNotice>,
+    price_search: PriceSearchTab,
     settings: SettingsTab,
 }
 
 pub fn run(
     hunter: Arc<Hunter>,
+    search: OfferSearch,
     storage: Storage,
     settings: UserSettings,
     runtime: tokio::runtime::Handle,
@@ -59,12 +65,13 @@ pub fn run(
     };
     let app = HunterApp {
         hunter: Arc::clone(&hunter),
-        tab: Tab::Watches,
+        tab: Tab::PriceSearch,
         form: None,
         pending_delete: None,
         deals_filter: None,
         confirm_clear_deals: false,
         dismissed: None,
+        price_search: PriceSearchTab::new(search, runtime.clone()),
         settings: SettingsTab::new(hunter, storage, settings, runtime),
     };
     eframe::run_native(
@@ -128,6 +135,7 @@ impl eframe::App for HunterApp {
             .exact_size(170.0)
             .show(ui, |ui| self.navigation(ui));
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
+            Tab::PriceSearch => self.price_search.show(ui),
             Tab::Watches => watches::show(ui, &self.hunter, &mut self.form, &mut self.pending_delete),
             Tab::Deals => deals::show(
                 ui,
@@ -169,6 +177,7 @@ impl HunterApp {
     fn navigation(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         for (tab, title) in [
+            (Tab::PriceSearch, "Поиск цены"),
             (Tab::Watches, "Слежки"),
             (Tab::Deals, "Находки"),
             (Tab::Settings, "Настройки"),

@@ -90,13 +90,13 @@ fn main() -> Result<()> {
         .zip(owner)
         .map(|(bot, owner)| Arc::new(TelegramAlerts::new(bot, owner)) as Arc<dyn Notifier>);
 
-    // Разовый поиск — по магазинам с новым товаром. Авито — б/у рядом с домом, это слежки; Яндекс Маркет слишком
-    // быстро просит проверку, и лишние заходы бота отняли бы их у его слежек.
-    let chat_sources = vec![
+    let search = OfferSearch::new(vec![
         (SourceKind::Ozon, Arc::clone(&ozon)),
         (SourceKind::Wildberries, Arc::clone(&wildberries)),
+        (SourceKind::YandexMarket, Arc::clone(&yandex_market)),
+        (SourceKind::Avito, Arc::clone(&avito)),
         (SourceKind::Dns, Arc::clone(&dns)),
-    ];
+    ]);
 
     let hunter = Arc::new(Hunter::new(
         HashMap::from([
@@ -119,7 +119,7 @@ fn main() -> Result<()> {
         runtime.spawn(telegram::run(
             bot,
             telegram,
-            OfferSearch::new(chat_sources),
+            search.clone(),
             Arc::clone(&hunter),
             ozon_site,
             parser_check,
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
         log::warn!("Telegram не настроен: окно работает, уведомлений не будет");
     }
 
-    gui::run(hunter, storage, settings, runtime.handle().clone())
+    gui::run(hunter, search, storage, settings, runtime.handle().clone())
 }
 
 async fn open_ozon(ozon: Arc<Ozon>) {

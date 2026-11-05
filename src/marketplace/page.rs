@@ -46,10 +46,13 @@ pub trait Listing: ScriptPage {
 }
 
 /// Как листать выдачу площадки: сколько страниц, каким параметром адреса номер и сколько ждать между ними.
+/// `full_page` — сколько карточек на полной странице: на меньшем выдача кончилась, а за её концом у ДНС страница
+/// без карточек, которую не отличить от ещё не загрузившейся (5.11.2026).
 pub struct Paging {
     pub pages: u32,
     pub number_key: &'static str,
     pub pause: Duration,
+    pub full_page: usize,
 }
 
 /// Некоторые площадки (Авито, ДНС, Wildberries, Яндекс Маркет) отдают выдачу только при настоящем переходе: запрос из скрипта
@@ -89,7 +92,7 @@ pub async fn read_pages<P: Listing>(
     if let Some(note) = page.note() {
         log::info!("{note}");
     }
-    let mut catalog = Catalog::default();
+    let mut catalog = Catalog::with_full_page(paging.full_page);
     for number in 2..=paging.pages {
         let address = numbered(page.url(), paging.number_key, number)?;
         let cards = page.cards();
@@ -97,11 +100,26 @@ pub async fn read_pages<P: Listing>(
             return Ok(catalog.offers);
         }
         sleep(paging.pause).await;
-        page = open(tab, address.as_str(), script, not_found).await?;
+        page = match open(tab, address.as_str(), script, not_found).await {
+            Ok(next) => next,
+            Err(error) => return keep_what_was_read(catalog.offers, error),
+        };
     }
     let cards = page.cards();
     catalog.add(cards, page.into_offers()?);
     Ok(catalog.offers)
+}
+
+/// Следующая страница не открылась — это не повод терять уже прочитанное. Проверка «я не робот» — повод: площадка
+/// просит остановиться, и об этом надо знать.
+fn keep_what_was_read(offers: Vec<Offer>, error: SourceError) -> Result<Vec<Offer>, SourceError> {
+    match error {
+        SourceError::Captcha => Err(error),
+        SourceError::NotReady | SourceError::Failed(_) => {
+            log::warn!("следующая страница выдачи не открылась, берём прочитанное: {error}");
+            Ok(offers)
+        }
+    }
 }
 
 /// Адрес страницы выдачи с номером `number` в параметре `key`, остальное — как было.
@@ -121,13 +139,19 @@ fn numbered(url: &str, key: &str, number: u32) -> anyhow::Result<Url> {
 
 /// Товары со страниц выдачи. Дальше листать стоит, пока страница полная и приносит новое: неполная — последняя,
 /// а без новых товаров площадка, видимо, показала за последней страницей уже виденное.
-#[derive(Default)]
 struct Catalog {
     offers: Vec<Offer>,
     page_size: usize,
 }
 
 impl Catalog {
+    fn with_full_page(page_size: usize) -> Self {
+        Self {
+            offers: Vec::new(),
+            page_size,
+        }
+    }
+
     fn add(&mut self, cards: usize, offers: Vec<Offer>) -> bool {
         let before = self.offers.len();
         for offer in offers {
@@ -190,19 +214,37 @@ mod tests {
 
     #[test]
     fn pages_are_read_while_full_and_bringing_new_offers() {
-        let mut catalog = Catalog::default();
+        let mut catalog = Catalog::with_full_page(24);
         assert!(catalog.add(24, offers(0..24)));
         assert!(catalog.add(24, offers(24..48)));
         assert!(!catalog.add(7, offers(48..55)), "неполная страница — последняя");
         assert_eq!(catalog.offers.len(), 55);
 
-        let mut repeated = Catalog::default();
+        let mut repeated = Catalog::with_full_page(24);
         repeated.add(24, offers(0..24));
         assert!(
             !repeated.add(24, offers(0..24)),
             "за последней страницей — уже виденное"
         );
         assert_eq!(repeated.offers.len(), 24);
+    }
+
+    #[test]
+    fn short_first_page_is_the_whole_list() {
+        let mut catalog = Catalog::with_full_page(24);
+        assert!(!catalog.add(12, offers(0..12)), "у ДНС 12 товаров: второй страницы нет");
+        assert_eq!(catalog.offers.len(), 12);
+    }
+
+    #[test]
+    fn next_page_that_did_not_open_does_not_lose_what_was_read() {
+        let read = keep_what_was_read(offers(0..12), SourceError::NotReady).unwrap();
+        assert_eq!(read.len(), 12);
+
+        assert!(matches!(
+            keep_what_was_read(offers(0..12), SourceError::Captcha),
+            Err(SourceError::Captcha)
+        ));
     }
 
     #[test]

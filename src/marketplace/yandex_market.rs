@@ -22,6 +22,7 @@ const PAGING: Paging = Paging {
     pages: 2,
     number_key: "page",
     pause: Duration::from_secs(5),
+    full_page: 8,
 };
 
 /// Яндекс Маркет. Как у ДНС, вкладка открывает поиск и читает готовые карточки, а страницы листаются адресом:
@@ -83,6 +84,25 @@ impl OfferSource for YandexMarket {
     async fn product(&self, _link: &Url) -> Result<Product, SourceError> {
         Err(anyhow!("Яндекс Маркет: за ценой одного товара программа пока не следит — только Ozon и ДНС").into())
     }
+
+    async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
+        self.search_link(&cheapest_url(query, from, to)?, Scope::default())
+            .await
+    }
+}
+
+/// `how=aprice` — от дешёвых, `pricefrom` и `priceto` — коридор цен (5.11.2026).
+fn cheapest_url(query: &str, from: u64, to: u64) -> anyhow::Result<Url> {
+    Url::parse_with_params(
+        &format!("{HOME}search"),
+        &[
+            ("text", query),
+            ("how", "aprice"),
+            ("pricefrom", &from.to_string()),
+            ("priceto", &to.to_string()),
+        ],
+    )
+    .context("не удалось составить адрес поиска")
 }
 
 impl ScriptPage for Page {
@@ -178,6 +198,14 @@ mod tests {
             url: "https://market.yandex.ru/search?text=sony".into(),
             cards,
         }
+    }
+
+    #[test]
+    fn cheapest_first_sorts_by_price_within_the_corridor() {
+        assert_eq!(
+            cheapest_url("sony", 2_000, 4_000).unwrap().as_str(),
+            "https://market.yandex.ru/search?text=sony&how=aprice&pricefrom=2000&priceto=4000"
+        );
     }
 
     #[test]

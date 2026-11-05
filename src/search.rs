@@ -3,9 +3,13 @@ mod order;
 mod request;
 mod synonyms;
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
-use futures_util::future::join_all;
+use anyhow::anyhow;
+use futures_util::future::{BoxFuture, join_all};
+use tokio::time::timeout;
 
 use crate::marketplace::{OfferSource, Scope, SourceError, SourceKind};
 use crate::offer::Offer;
@@ -17,9 +21,14 @@ pub use request::{PriceRange, SearchRequest, ShopConditions};
 /// Меньше предложений — самая высокая цена выдачи ни о чём не говорит.
 const OFFERS_TO_JUDGE_OLD_PRICE: usize = 5;
 
+/// Дольше площадку не ждём: остальные уже ответили, а у Яндекс Маркета очередь поисков бывает в несколько минут.
+const SOURCE_PATIENCE: Duration = Duration::from_secs(130);
+
 /// Разовый поиск по нескольким площадкам сразу: лучшая цена — по всем, а не по одному магазину.
+#[derive(Clone)]
 pub struct OfferSearch {
     sources: Vec<(SourceKind, Arc<dyn OfferSource>)>,
+    patience: Duration,
 }
 
 pub struct Findings {
@@ -43,7 +52,23 @@ pub struct Finding {
 
 impl OfferSearch {
     pub fn new(sources: Vec<(SourceKind, Arc<dyn OfferSource>)>) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            patience: SOURCE_PATIENCE,
+        }
+    }
+
+    /// Тот же поиск только по выбранным площадкам.
+    pub fn only(&self, kinds: &[SourceKind]) -> Self {
+        Self {
+            sources: self
+                .sources
+                .iter()
+                .filter(|(kind, _)| kinds.contains(kind))
+                .cloned()
+                .collect(),
+            patience: self.patience,
+        }
     }
 
     /// Куда идёт этот запрос: «только Ozon» другие площадки всё равно не пройдут, и заходить на них незачем.
@@ -60,12 +85,38 @@ impl OfferSearch {
     /// Площадки опрашиваются одновременно, у каждой своя вкладка. Ошибка — только если не нашлось нигде и хоть одна
     /// площадка не ответила; иначе ответ из того, что есть, а не ответившие — в `Findings::failed`.
     pub async fn find(&self, request: &SearchRequest) -> Result<Findings, (SourceKind, SourceError)> {
-        let answers = join_all(
-            self.asked(request)
-                .map(|(kind, source)| async move { (*kind, source.search(&request.query, Scope::default()).await) }),
-        )
+        let (offers, mut failed) = self
+            .gather(request, |source| source.search(&request.query, Scope::default()))
+            .await;
+        if offers.is_empty() && !failed.is_empty() {
+            return Err(failed.remove(0));
+        }
+        Ok(arranged(request, offers, failed))
+    }
+
+    /// От дешёвых к дорогим в коридоре цен — там, где площадка так умеет.
+    pub async fn find_cheapest(&self, request: &SearchRequest, from: u64, to: u64) -> Findings {
+        let (offers, failed) = self
+            .gather(request, |source| source.search_cheapest(&request.query, from, to))
+            .await;
+        arranged(request, offers, failed)
+    }
+
+    async fn gather<'a>(
+        &'a self,
+        request: &'a SearchRequest,
+        ask: impl Fn(&'a dyn OfferSource) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>>,
+    ) -> (Vec<(SourceKind, Offer)>, Vec<(SourceKind, SourceError)>) {
+        let answers = join_all(self.asked(request).map(|(kind, source)| {
+            let answer = ask(source.as_ref());
+            async move {
+                let answer = timeout(self.patience, answer).await;
+                let answer = answer.unwrap_or_else(|_| Err(anyhow!("не успел ответить, попробуйте позже").into()));
+                (*kind, answer)
+            }
+        }))
         .await;
-        let mut offers: Vec<(SourceKind, Offer)> = Vec::new();
+        let mut offers = Vec::new();
         let mut failed = Vec::new();
         for (kind, answer) in answers {
             match answer {
@@ -73,45 +124,77 @@ impl OfferSearch {
                 Err(error) => failed.push((kind, error)),
             }
         }
-        if offers.is_empty() && !failed.is_empty() {
-            return Err(failed.remove(0));
-        }
+        (offers, failed)
+    }
 
-        let scanned = offers.len();
-        let filter = OfferFilter::new(request);
-        let measured: Vec<(SourceKind, Offer, Option<Quantity>)> = offers
-            .into_iter()
-            .filter(|(_, offer)| filter.accepts(offer))
-            .map(|(kind, offer)| {
-                let quantity = Quantity::in_title(&offer.name);
-                (kind, offer, quantity)
-            })
-            .collect();
-        let packed_in = most_common_unit(measured.iter().map(|(_, _, quantity)| *quantity))
-            .filter(|&(_, count)| count * 2 > measured.len())
-            .map(|(unit, _)| unit);
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
 
-        let suitable: Vec<Finding> = measured
-            .into_iter()
-            .map(|(source, offer, quantity)| Finding {
-                source,
-                unit_price: quantity
-                    .filter(|quantity| Some(quantity.unit) == request.per_unit)
-                    .map(|quantity| quantity.unit_price(offer.price)),
-                offer,
-            })
-            .collect();
-        let suitable = request.order.arrange(suitable);
-        Ok(Findings {
-            scanned,
-            suitable,
-            packed_in,
-            failed,
+    /// Обычные площадки и те, куда поиск цены заходит только один раз (`SourceKind::is_asked_once`).
+    pub fn split_asked_once(&self) -> (Self, Self) {
+        let (once, regular): (Vec<_>, Vec<_>) =
+            self.sources.iter().cloned().partition(|(kind, _)| kind.is_asked_once());
+        let with = |sources| Self {
+            sources,
+            patience: self.patience,
+        };
+        (with(regular), with(once))
+    }
+}
+
+fn arranged(
+    request: &SearchRequest,
+    offers: Vec<(SourceKind, Offer)>,
+    failed: Vec<(SourceKind, SourceError)>,
+) -> Findings {
+    let scanned = offers.len();
+    let filter = OfferFilter::new(request);
+    let measured: Vec<(SourceKind, Offer, Option<Quantity>)> = offers
+        .into_iter()
+        .filter(|(_, offer)| filter.accepts(offer))
+        .map(|(kind, offer)| {
+            let quantity = Quantity::in_title(&offer.name);
+            (kind, offer, quantity)
         })
+        .collect();
+    let packed_in = most_common_unit(measured.iter().map(|(_, _, quantity)| *quantity))
+        .filter(|&(_, count)| count * 2 > measured.len())
+        .map(|(unit, _)| unit);
+
+    let suitable: Vec<Finding> = measured
+        .into_iter()
+        .map(|(source, offer, quantity)| Finding {
+            source,
+            unit_price: quantity
+                .filter(|quantity| Some(quantity.unit) == request.per_unit)
+                .map(|quantity| quantity.unit_price(offer.price)),
+            offer,
+        })
+        .collect();
+    Findings {
+        scanned,
+        suitable: request.order.arrange(suitable),
+        packed_in,
+        failed,
     }
 }
 
 impl Findings {
+    /// Добавить найденное другим проходом: то же предложение по той же ссылке считается один раз.
+    pub fn merge(&mut self, other: Findings, request: &SearchRequest) {
+        let known: HashSet<String> = self.suitable.iter().map(|found| found.offer.url.clone()).collect();
+        self.scanned += other.scanned;
+        self.suitable.extend(
+            other
+                .suitable
+                .into_iter()
+                .filter(|found| !known.contains(&found.offer.url)),
+        );
+        self.failed.extend(other.failed);
+        self.suitable = request.order.arrange(std::mem::take(&mut self.suitable));
+    }
+
     /// Выше этого старая цена не похожа на настоящую: в полтора раза дороже самого дорогого, что сейчас продаётся
     /// в той же выдаче. Запас нужен, потому что сама дорогая вещь выдачи могла честно подешеветь.
     pub fn believable_old_price(&self) -> Option<u64> {
@@ -218,6 +301,69 @@ mod tests {
         let many = on_ozon(Arc::new(FakeSource::returning(offers)));
         let findings = many.find(&SearchRequest::parse("наушники sony")).await.unwrap();
         assert_eq!(findings.believable_old_price(), Some(7500));
+    }
+
+    /// Площадка, которая не отвечает никогда: стоит в очереди или зависла.
+    struct Silent;
+
+    #[async_trait::async_trait]
+    impl OfferSource for Silent {
+        fn name(&self) -> &'static str {
+            "молчун"
+        }
+
+        async fn search(&self, _query: &str, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
+            std::future::pending().await
+        }
+
+        async fn search_link(&self, _link: &reqwest::Url, _scope: Scope) -> Result<Vec<Offer>, SourceError> {
+            std::future::pending().await
+        }
+
+        async fn product(&self, _link: &reqwest::Url) -> Result<crate::marketplace::Product, SourceError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn source_that_keeps_silent_does_not_hold_the_others_forever() {
+        let search = OfferSearch {
+            patience: Duration::from_millis(20),
+            ..OfferSearch::new(vec![
+                (
+                    SourceKind::Ozon,
+                    Arc::new(FakeSource::returning(vec![Offer::sample("Наушники Sony", 3000)])),
+                ),
+                (SourceKind::YandexMarket, Arc::new(Silent)),
+            ])
+        };
+
+        let findings = search.find(&SearchRequest::parse("наушники sony")).await.unwrap();
+
+        assert_eq!(sourced(&findings), [(SourceKind::Ozon, 3000)]);
+        assert!(matches!(
+            findings.failed.as_slice(),
+            [(SourceKind::YandexMarket, SourceError::Failed(_))]
+        ));
+    }
+
+    #[tokio::test]
+    async fn search_can_be_narrowed_to_chosen_sources() {
+        let wildberries = FakeSource::returning(Vec::new());
+        let visits = wildberries.queries();
+        let search = OfferSearch::new(vec![
+            (
+                SourceKind::Ozon,
+                Arc::new(FakeSource::returning(vec![Offer::sample("Наушники Sony", 3000)])),
+            ),
+            (SourceKind::Wildberries, Arc::new(wildberries)),
+        ])
+        .only(&[SourceKind::Ozon]);
+
+        let findings = search.find(&SearchRequest::parse("наушники sony")).await.unwrap();
+
+        assert_eq!(sourced(&findings), [(SourceKind::Ozon, 3000)]);
+        assert!(visits.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
