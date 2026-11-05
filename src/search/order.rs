@@ -77,10 +77,12 @@ fn trusted_rating(offer: &Offer) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::marketplace::SourceKind;
     use crate::quantity::{Unit, UnitPrice};
 
     fn found(name: &str, price: u64) -> Finding {
         Finding {
+            source: SourceKind::Ozon,
             offer: Offer::sample(name, price),
             unit_price: None,
         }
@@ -92,6 +94,7 @@ mod tests {
 
     fn rated(name: &str, price: u64, rating: f32, reviews: u64) -> Finding {
         Finding {
+            source: SourceKind::Ozon,
             offer: Offer {
                 rating: Some(rating),
                 reviews: Some(reviews),
@@ -103,6 +106,7 @@ mod tests {
 
     fn discounted(name: &str, price: u64, old_price: Option<u64>) -> Finding {
         Finding {
+            source: SourceKind::Ozon,
             offer: Offer {
                 old_price,
                 ..Offer::sample(name, price)

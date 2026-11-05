@@ -1,16 +1,18 @@
+mod buttons;
 mod render;
 mod self_check;
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InputFile, LinkPreviewOptions, ParseMode, UserId};
 
+use self::buttons::{Answer, Answers, Press, Pressed, deal_key};
 use crate::export;
 use crate::health::ParserCheck;
-use crate::hunt::{Alert, Hunter, Notifier, RunStatus, SourceReport, Watch};
+use crate::hunt::{Alert, Deal, Hunter, Notifier, RunStatus, SourceReport, Watch};
 use crate::marketplace::SourceKind;
 use crate::marketplace::ozon::Ozon;
 use crate::search::{OfferSearch, SearchRequest};
@@ -38,6 +40,7 @@ struct ChatBot {
     ozon: Arc<Ozon>,
     allowed_users: HashSet<u64>,
     top: usize,
+    answers: Mutex<Answers>,
 }
 
 /// Уведомления о находках слежек — владельцу бота в личные сообщения.
@@ -58,11 +61,15 @@ impl TelegramAlerts {
 #[async_trait]
 impl Notifier for TelegramAlerts {
     async fn notify(&self, alert: Alert<'_>) -> anyhow::Result<()> {
-        self.bot
+        let message = self
+            .bot
             .send_message(self.owner, render::alert(&alert))
             .parse_mode(ParseMode::Html)
-            .link_preview_options(WITHOUT_LINK_PREVIEW)
-            .await?;
+            .link_preview_options(WITHOUT_LINK_PREVIEW);
+        match render::alert_keyboard(&alert) {
+            Some(keyboard) => message.reply_markup(keyboard).await?,
+            None => message.await?,
+        };
         Ok(())
     }
 }
@@ -88,10 +95,17 @@ pub async fn run(
         ozon,
         allowed_users: settings.allowed_users,
         top: settings.top,
+        answers: Mutex::new(Answers::new()),
     });
-    let handler = Update::filter_message().endpoint(|bot: Bot, message: Message, chat_bot: Arc<ChatBot>| async move {
-        chat_bot.handle(&bot, &message).await
-    });
+    let handler = dptree::entry()
+        .branch(
+            Update::filter_message().endpoint(|bot: Bot, message: Message, chat_bot: Arc<ChatBot>| async move {
+                chat_bot.handle(&bot, &message).await
+            }),
+        )
+        .branch(Update::filter_callback_query().endpoint(
+            |bot: Bot, query: CallbackQuery, chat_bot: Arc<ChatBot>| async move { chat_bot.press(&bot, &query).await },
+        ));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![chat_bot])
@@ -153,30 +167,123 @@ impl ChatBot {
     }
 
     async fn answer(&self, bot: &Bot, chat: ChatId, request: &SearchRequest) -> ResponseResult<()> {
-        let source = self.search.source_name();
+        let sources = self.search.source_names(request);
         let status = bot
-            .send_message(chat, render::searching(&request.query, source))
+            .send_message(chat, render::searching(&request.query, &sources))
             .await?;
 
         match self.search.find(request).await {
             Ok(findings) => {
-                bot.edit_message_text(chat, status.id, render::findings(request, &findings, self.top))
+                for (source, error) in &findings.failed {
+                    log::warn!("поиск «{}»: {} не ответил — {error:#}", request.query, source.title());
+                }
+                let table = (!findings.suitable.is_empty()).then(|| export::csv(&findings.suitable, request.per_unit));
+                let (text, keyboard) = {
+                    let mut answers = self.answers.lock().unwrap();
+                    let key = answers.add(Answer::new(request.clone(), findings));
+                    answers.get_mut(key).map(|answer| answer.show(key, self.top)).unwrap()
+                };
+                bot.edit_message_text(chat, status.id, text)
                     .parse_mode(ParseMode::Html)
                     .link_preview_options(WITHOUT_LINK_PREVIEW)
+                    .reply_markup(keyboard)
                     .await?;
-                if !findings.suitable.is_empty() {
-                    let table = InputFile::memory(export::csv(&findings.suitable, request.per_unit))
-                        .file_name(render::table_file_name(&request.query, source));
+                if let Some(table) = table {
+                    let table = InputFile::memory(table).file_name(render::table_file_name(&request.query));
                     bot.send_document(chat, table).await?;
                 }
             }
-            Err(error) => {
+            Err((source, error)) => {
+                let source = source.title();
                 log::warn!("поиск «{}» на {source} не удался: {error:#}", request.query);
                 bot.edit_message_text(chat, status.id, render::failure(&error, source))
                     .await?;
             }
         }
         Ok(())
+    }
+
+    /// Нажатие надо подтвердить в любом случае: без ответа Telegram крутит на кнопке часики.
+    async fn press(&self, bot: &Bot, query: &CallbackQuery) -> ResponseResult<()> {
+        let note = match buttons::pressed(query.data.as_deref(), query.from.id.0, &self.allowed_users) {
+            Pressed::Denied => Some(render::BUTTON_DENIED.to_string()),
+            Pressed::Unknown => Some(render::BUTTON_STALE.to_string()),
+            Pressed::Button(press) => match query.regular_message() {
+                Some(message) => self.act_on(bot, message, press).await.unwrap_or_else(|error| {
+                    log::warn!("кнопка {}: {error}", press.data());
+                    Some(render::BUTTON_FAILED.to_string())
+                }),
+                None => Some(render::BUTTON_STALE.to_string()),
+            },
+        };
+        let confirmation = bot.answer_callback_query(query.id.clone());
+        match note {
+            Some(note) => confirmation.text(note).await?,
+            None => confirmation.await?,
+        };
+        Ok(())
+    }
+
+    /// Что сделать по кнопке; ответ — короткая всплывающая подсказка, если сообщение в чате само не изменилось.
+    async fn act_on(&self, bot: &Bot, message: &Message, press: Press) -> ResponseResult<Option<String>> {
+        match press {
+            Press::More(key) | Press::ByDiscount(key) | Press::GoodRating(key) => {
+                let shown = self.answers.lock().unwrap().get_mut(key).map(|answer| {
+                    answer.apply(press);
+                    answer.show(key, self.top)
+                });
+                let Some((text, keyboard)) = shown else {
+                    return Ok(Some(render::BUTTON_STALE.to_string()));
+                };
+                bot.edit_message_text(message.chat.id, message.id, text)
+                    .parse_mode(ParseMode::Html)
+                    .link_preview_options(WITHOUT_LINK_PREVIEW)
+                    .reply_markup(keyboard)
+                    .await?;
+                Ok(None)
+            }
+            Press::Watch(key) => {
+                let request = self
+                    .answers
+                    .lock()
+                    .unwrap()
+                    .get_mut(key)
+                    .map(|answer| answer.request.clone());
+                Ok(Some(request.map_or(render::BUTTON_STALE.to_string(), |request| {
+                    match self.hunter.save_watch(Watch::for_request(&request)) {
+                        Ok(_) => render::watch_saved(&request.query),
+                        Err(problems) => render::watch_refused(&problems),
+                    }
+                })))
+            }
+            Press::Miss { watch_id, deal } => {
+                let Some(deal) = self.deal(watch_id, deal) else {
+                    return Ok(Some(render::DEAL_GONE.to_string()));
+                };
+                bot.send_message(message.chat.id, render::miss_question(&deal))
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(render::miss_keyboard(&deal))
+                    .await?;
+                Ok(None)
+            }
+            Press::Reason { watch_id, deal, miss } => {
+                let Some(deal) = self.deal(watch_id, deal) else {
+                    return Ok(Some(render::DEAL_GONE.to_string()));
+                };
+                let stop_words = self.hunter.dismiss(watch_id, &deal.offer.url, miss);
+                bot.edit_message_text(message.chat.id, message.id, render::missed(&deal, miss, &stop_words))
+                    .parse_mode(ParseMode::Html)
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn deal(&self, watch_id: u64, key: u64) -> Option<Deal> {
+        self.hunter
+            .deals()
+            .into_iter()
+            .find(|deal| deal.watch_id == watch_id && deal_key(&deal.offer.url) == key)
     }
 }
 

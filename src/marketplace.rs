@@ -3,6 +3,8 @@ pub mod dns;
 pub mod ozon;
 mod page;
 mod throttle;
+pub mod wildberries;
+pub mod yandex_market;
 
 pub use throttle::Throttled;
 
@@ -21,36 +23,58 @@ pub enum SourceKind {
     Ozon,
     Avito,
     Dns,
+    Wildberries,
+    YandexMarket,
 }
 
 impl SourceKind {
-    pub const ALL: [SourceKind; 3] = [SourceKind::Ozon, SourceKind::Avito, SourceKind::Dns];
+    pub const ALL: [SourceKind; 5] = [
+        SourceKind::Ozon,
+        SourceKind::Wildberries,
+        SourceKind::YandexMarket,
+        SourceKind::Avito,
+        SourceKind::Dns,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             SourceKind::Ozon => "Ozon",
             SourceKind::Avito => "Авито",
             SourceKind::Dns => "ДНС",
+            SourceKind::Wildberries => "Wildberries",
+            SourceKind::YandexMarket => "Яндекс Маркет",
+        }
+    }
+
+    /// Для фраз вроде «слежки Яндекс Маркета»: остальные названия не склоняются.
+    pub fn genitive(self) -> &'static str {
+        match self {
+            SourceKind::YandexMarket => "Яндекс Маркета",
+            other => other.title(),
         }
     }
 
     /// Чаще проверять не стоит: площадка начнёт показывать проверку «я не робот».
-    /// ДНС закрыт антибот-защитой строже Ozon — проверки реже.
+    /// ДНС закрыт антибот-защитой строже Ozon — проверки реже; Wildberries — новая площадка, пока так же осторожно.
+    /// Яндекс Маркет показал проверку на третьем переходе за пару минут (5.11.2026) — ещё реже.
     pub fn min_interval_minutes(self) -> u32 {
         match self {
             SourceKind::Ozon => 5,
-            SourceKind::Avito | SourceKind::Dns => 15,
+            SourceKind::Avito | SourceKind::Dns | SourceKind::Wildberries => 15,
+            SourceKind::YandexMarket => 30,
         }
     }
 
     /// Самое частое, с чем площадка мирится без проверки «я не робот», — общий предел для слежек, бота
-    /// и самопроверки. Один поиск Ozon — это ещё и до десятка порций выдачи, Авито и ДНС открывают страницы целиком.
+    /// и самопроверки. Один поиск Ozon — это ещё и до десятка порций выдачи, остальные открывают страницы
+    /// целиком. Интервал слежки действует на одну слежку, а этот предел — на всю площадку: у Маркета поиск — два
+    /// перехода, а проверку он показал на третьем за пару минут (5.11.2026), поэтому две его слежки подряд не идут.
     pub fn search_gap(self) -> Duration {
-        let searches_per_minute = match self {
-            SourceKind::Ozon => 4,
-            SourceKind::Avito | SourceKind::Dns => 2,
-        };
-        Duration::from_mins(1) / searches_per_minute
+        match self {
+            SourceKind::Ozon => Duration::from_secs(15),
+            SourceKind::Avito | SourceKind::Dns | SourceKind::Wildberries => Duration::from_secs(30),
+            SourceKind::YandexMarket => Duration::from_mins(3),
+        }
     }
 
     /// Радиусы, которые площадка умеет искать вокруг точки и для которых пишет расстояние до объявления.
@@ -58,7 +82,7 @@ impl SourceKind {
     /// Авито проверено вживую (октябрь 2026): другие значения он молча отбрасывает.
     pub fn radii_km(self) -> &'static [u32] {
         match self {
-            SourceKind::Ozon | SourceKind::Dns => &[],
+            SourceKind::Ozon | SourceKind::Dns | SourceKind::Wildberries | SourceKind::YandexMarket => &[],
             SourceKind::Avito => &[1, 2, 3, 5, 10, 15, 25],
         }
     }
@@ -67,9 +91,9 @@ impl SourceKind {
         !self.radii_km().is_empty()
     }
 
-    /// Срок доставки пишут магазины — Ozon и ДНС; у объявлений Авито его нет.
+    /// Срок доставки пишут магазины; у объявлений Авито его нет.
     pub fn has_delivery(self) -> bool {
-        matches!(self, SourceKind::Ozon | SourceKind::Dns)
+        self != SourceKind::Avito
     }
 
     /// Метка «продаёт сам Ozon» бывает только у маркетплейса со сторонними продавцами.
@@ -94,6 +118,14 @@ impl SourceKind {
                 "Цены и наличие ДНС — для города, выбранного на dns-shop.ru в окне браузера программы: \
                  выберите там свой город один раз",
             ),
+            SourceKind::Wildberries => Some(
+                "Цены Wildberries — как на сайте, «с WB Кошельком»; сроки доставки — для адреса, выбранного \
+                 на wildberries.ru в окне браузера программы (сначала там Москва)",
+            ),
+            SourceKind::YandexMarket => Some(
+                "Цены Яндекс Маркета — как на плитке, «с картой Яндекс Пэй»; проверки не чаще раза в 30 минут: \
+                 Маркет быстро просит подтвердить, что вы не робот",
+            ),
             SourceKind::Ozon | SourceKind::Avito => None,
         }
     }
@@ -103,6 +135,8 @@ impl SourceKind {
             SourceKind::Ozon => "www.ozon.ru",
             SourceKind::Avito => "www.avito.ru",
             SourceKind::Dns => "www.dns-shop.ru",
+            SourceKind::Wildberries => "www.wildberries.ru",
+            SourceKind::YandexMarket => "market.yandex.ru",
         }
     }
 
@@ -143,7 +177,7 @@ impl SourceKind {
         if !self.has_product_pages() {
             return Err(format!(
                 "Следить за ценой товара по ссылке можно на Ozon и в ДНС, у {} — нет",
-                self.title()
+                self.genitive()
             ));
         }
         let mut link = self.parse_link(text)?;
@@ -357,6 +391,38 @@ mod tests {
         );
 
         assert!(SourceKind::Dns.cheapest_first("наушники", None, 1_000, 2_000).is_none());
+    }
+
+    #[test]
+    fn yandex_market_link_keeps_its_address_without_www() {
+        let link = SourceKind::YandexMarket
+            .parse_link("https://market.yandex.ru/search?text=sony&glfilter=7893318")
+            .unwrap();
+        assert_eq!(link.host_str(), Some("market.yandex.ru"));
+        assert!(
+            SourceKind::YandexMarket
+                .parse_link("https://www.ozon.ru/search/")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn yandex_market_searches_leave_fewer_than_three_page_openings_in_two_minutes() {
+        assert!(SourceKind::YandexMarket.search_gap() > Duration::from_mins(2));
+    }
+
+    #[test]
+    fn notes_for_the_form_are_one_line_of_plain_text() {
+        for source in SourceKind::ALL {
+            let note = source.note().unwrap_or_default();
+            assert!(!note.contains('\n') && !note.contains("  "), "{note}");
+        }
+    }
+
+    #[test]
+    fn only_yandex_market_is_declined() {
+        assert_eq!(SourceKind::YandexMarket.genitive(), "Яндекс Маркета");
+        assert_eq!(SourceKind::Wildberries.genitive(), "Wildberries");
     }
 
     #[test]

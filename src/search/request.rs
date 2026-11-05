@@ -35,7 +35,7 @@ pub struct SearchRequest {
     pub shop: ShopConditions,
 }
 
-/// Условия к магазину: срок доставки знают Ozon и ДНС, продавца-маркетплейс — только Ozon. У объявлений Авито нет ни того, ни другого.
+/// Условия к магазину: срок доставки знают магазины (`SourceKind::has_delivery`), продавца-маркетплейс — только Ozon. У объявлений Авито нет ни того, ни другого.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ShopConditions {
     /// «доставка завтра»: привезут не позже завтра.

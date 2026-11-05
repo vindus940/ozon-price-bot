@@ -32,6 +32,8 @@ use crate::hunt::{Hunter, Notifier};
 use crate::marketplace::avito::Avito;
 use crate::marketplace::dns::Dns;
 use crate::marketplace::ozon::Ozon;
+use crate::marketplace::wildberries::Wildberries;
+use crate::marketplace::yandex_market::YandexMarket;
 use crate::marketplace::{OfferSource, SourceError, SourceKind, Throttled};
 use crate::search::OfferSearch;
 use crate::settings::UserSettings;
@@ -74,7 +76,12 @@ fn main() -> Result<()> {
         )),
         SourceKind::Avito,
     );
-    let dns = throttled(Arc::new(Dns::new(browser)), SourceKind::Dns);
+    let dns = throttled(Arc::new(Dns::new(Arc::clone(&browser))), SourceKind::Dns);
+    let wildberries = throttled(
+        Arc::new(Wildberries::new(Arc::clone(&browser))),
+        SourceKind::Wildberries,
+    );
+    let yandex_market = throttled(Arc::new(YandexMarket::new(browser)), SourceKind::YandexMarket);
 
     let bot = config.telegram.as_ref().map(|telegram| Bot::new(&telegram.token));
     let owner = config.telegram.as_ref().and_then(|telegram| telegram.owner);
@@ -83,11 +90,21 @@ fn main() -> Result<()> {
         .zip(owner)
         .map(|(bot, owner)| Arc::new(TelegramAlerts::new(bot, owner)) as Arc<dyn Notifier>);
 
+    // Разовый поиск — по магазинам с новым товаром. Авито — б/у рядом с домом, это слежки; Яндекс Маркет слишком
+    // быстро просит проверку, и лишние заходы бота отняли бы их у его слежек.
+    let chat_sources = vec![
+        (SourceKind::Ozon, Arc::clone(&ozon)),
+        (SourceKind::Wildberries, Arc::clone(&wildberries)),
+        (SourceKind::Dns, Arc::clone(&dns)),
+    ];
+
     let hunter = Arc::new(Hunter::new(
         HashMap::from([
             (SourceKind::Ozon, Arc::clone(&ozon)),
             (SourceKind::Avito, avito),
             (SourceKind::Dns, dns),
+            (SourceKind::Wildberries, wildberries),
+            (SourceKind::YandexMarket, yandex_market),
         ]),
         notifier,
         storage.clone(),
@@ -102,7 +119,7 @@ fn main() -> Result<()> {
         runtime.spawn(telegram::run(
             bot,
             telegram,
-            OfferSearch::new(ozon),
+            OfferSearch::new(chat_sources),
             Arc::clone(&hunter),
             ozon_site,
             parser_check,

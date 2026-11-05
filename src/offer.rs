@@ -33,12 +33,12 @@ pub struct Offer {
 }
 
 impl Offer {
-    /// Привезут сегодня или завтра: «Сегодня», «Завтра», у экспресса — «За час», «За 2 часа».
-    /// Неизвестный срок условие не проходит, как и неизвестный рейтинг.
+    /// Привезут сегодня или завтра: «Сегодня», «Завтра», у Маркета — «Сегодня до 19:00», у экспресса — «За час»,
+    /// «За 2 часа». Неизвестный срок условие не проходит, как и неизвестный рейтинг.
     pub fn arrives_by_tomorrow(&self) -> bool {
         self.delivery.as_deref().is_some_and(|when| {
             let when = when.trim().to_lowercase();
-            when == "сегодня" || when == "завтра" || when.starts_with("за ")
+            when.starts_with("сегодня") || when.starts_with("завтра") || when.starts_with("за ")
         })
     }
 
@@ -105,7 +105,7 @@ mod tests {
             }
             .arrives_by_tomorrow()
         };
-        for when in ["Сегодня", "Завтра", "За час", "За 2 часа"] {
+        for when in ["Сегодня", "Завтра", "Сегодня до 19:00", "За час", "За 2 часа"] {
             assert!(arriving(Some(when)), "{when}");
         }
         assert!(!arriving(Some("13 октября")));

@@ -104,6 +104,26 @@ pub struct Watch {
 }
 
 impl Watch {
+    /// Слежка по разовому запросу из Telegram: бот ищет на Ozon, условия запроса становятся условиями слежки.
+    /// Цена за килограмм имеет смысл только у расходников — так их и определяет форма слежки.
+    pub fn for_request(request: &SearchRequest) -> Self {
+        Self {
+            name: request.query.clone(),
+            category: if request.per_unit.is_some() {
+                Category::Consumables
+            } else {
+                Category::Any
+            },
+            query: request.query.clone(),
+            price: request.price,
+            stop_words: request.excluded.clone(),
+            min_rating: request.min_rating,
+            min_reviews: request.min_reviews,
+            shop: request.shop,
+            ..Self::new_draft()
+        }
+    }
+
     pub fn new_draft() -> Self {
         Self {
             id: 0,
@@ -340,6 +360,29 @@ mod tests {
             query: "iphone 15 128".into(),
             ..Watch::new_draft()
         }
+    }
+
+    #[test]
+    fn watch_from_a_request_keeps_its_conditions_and_passes_validation() {
+        let request =
+            SearchRequest::parse("наушники sony -чехол до 5000 рейтинг от 4.5 отзывов от 100 доставка завтра");
+
+        let watch = Watch::for_request(&request);
+
+        assert_eq!(
+            (watch.name.as_str(), watch.query.as_str()),
+            ("наушники sony", "наушники sony")
+        );
+        assert_eq!(watch.source, SourceKind::Ozon);
+        assert_eq!(watch.category, Category::Any);
+        assert_eq!(watch.price.max, Some(5000));
+        assert_eq!(watch.stop_words, ["чехол"]);
+        assert_eq!((watch.min_rating, watch.min_reviews), (Some(4.5), Some(100)));
+        assert!(watch.shop.by_tomorrow);
+        assert!(watch.problems(false).is_empty());
+
+        let powder = Watch::for_request(&SearchRequest::parse("стиральный порошок за кг"));
+        assert_eq!(powder.category, Category::Consumables);
     }
 
     fn drill_for_resale() -> Watch {

@@ -291,13 +291,13 @@ fn pause_text(source: SourceKind, pause: Pause) -> String {
     match pause {
         Pause::Until(until) => format!(
             " Слежки {} на паузе до {} после проверки «я не робот».",
-            source.title(),
+            source.genitive(),
             until.format("%H:%M")
         ),
         Pause::UntilManualCheck => format!(
             " Слежки {} остановлены после трёх проверок «я не робот» подряд — пройдите проверку в окне браузера \
              программы и нажмите «Проверить сейчас».",
-            source.title()
+            source.genitive()
         ),
     }
 }

@@ -440,7 +440,7 @@ impl Hunter {
                 let pause = self.state().schedule.captcha(watch.source, Local::now());
                 let reason = format!(
                     "{}; {}",
-                    failure_reason(watch.source.title(), &SourceError::Captcha),
+                    failure_reason(watch.source, &SourceError::Captcha),
                     pause_note(watch.source, pause)
                 );
                 self.fail(&watch, reason).await;
@@ -500,7 +500,7 @@ impl Hunter {
                 self.state().journal.write(format!(
                     "«{}»: выдача от дешёвых не пришла, проверено по обычной — {}",
                     watch.name,
-                    failure_reason(watch.source.title(), &error)
+                    failure_reason(watch.source, &error)
                 ));
                 Vec::new()
             }
@@ -784,28 +784,30 @@ impl CheckError {
     fn reason(&self, source: SourceKind) -> String {
         match self {
             CheckError::Setup(reason) => reason.clone(),
-            CheckError::Source(error) => failure_reason(source.title(), error),
+            CheckError::Source(error) => failure_reason(source, error),
         }
     }
 }
 
 fn pause_note(source: SourceKind, pause: Pause) -> String {
     match pause {
-        Pause::Until(until) => format!("слежки {} подождут до {}", source.title(), until.format("%H:%M")),
+        Pause::Until(until) => format!("слежки {} подождут до {}", source.genitive(), until.format("%H:%M")),
         Pause::UntilManualCheck => format!(
             "это третья такая проверка подряд: слежки {} остановлены, пока вы не нажмёте «Проверить сейчас»",
-            source.title()
+            source.genitive()
         ),
     }
 }
 
-fn failure_reason(source: &str, error: &SourceError) -> String {
+fn failure_reason(source: SourceKind, error: &SourceError) -> String {
     match error {
-        SourceError::Captcha => {
-            format!("{source} просит подтвердить, что вы не робот — пройдите проверку в окне браузера программы")
-        }
+        SourceError::Captcha => format!(
+            "{} просит подтвердить, что вы не робот — пройдите проверку в окне браузера программы",
+            source.title()
+        ),
         SourceError::NotReady => format!(
-            "страница {source} не открылась — посмотрите окно браузера программы, возможно, там проверка «я не робот»"
+            "страница {} не открылась — посмотрите окно браузера программы, возможно, там проверка «я не робот»",
+            source.genitive()
         ),
         SourceError::Failed(error) => format!("{error:#}"),
     }

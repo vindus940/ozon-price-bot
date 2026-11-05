@@ -1,9 +1,10 @@
-use teloxide::types::BotCommand;
+use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup};
 
 use super::WatchAction;
+use super::buttons::{Press, deal_key};
 use crate::format::{price_drop, rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
-use crate::hunt::{Alert, Deal, Goal, Lowest, Outcome, Pause, RunStatus, SourceReport, Watch};
+use crate::hunt::{Alert, Deal, Goal, Lowest, Miss, Outcome, Pause, RunStatus, SourceReport, Watch};
 use crate::marketplace::{Product, SiteStatus, SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
@@ -11,8 +12,18 @@ use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
 const MESSAGE_LIMIT: usize = 4096;
 const NAME_LIMIT: usize = 90;
 const SAMPLE_NAME_LIMIT: usize = 60;
+/// Больше кнопок «Мимо» только заслонят сообщение; остальное — во вкладке «Находки».
+const MISS_BUTTONS: usize = 5;
+const BUTTON_NAME_LIMIT: usize = 30;
+/// Всплывающая подсказка Telegram длиннее не показывается.
+const NOTE_LIMIT: usize = 200;
 
-pub(super) const HELP: &str = "Напишите, что ищете, — пришлю самые дешёвые предложения и таблицу для Excel.
+pub(super) const BUTTON_DENIED: &str = "Эти кнопки работают только у владельца бота";
+pub(super) const BUTTON_STALE: &str = "Этот ответ устарел — отправьте запрос заново";
+pub(super) const DEAL_GONE: &str = "Этой находки уже нет";
+pub(super) const BUTTON_FAILED: &str = "Telegram не принял ответ — нажмите ещё раз";
+
+pub(super) const HELP: &str = "Напишите, что ищете, — пришлю самые дешёвые предложения Ozon, Wildberries и ДНС и таблицу для Excel.
 
 Цену можно ограничить словами <b>от</b> и <b>до</b>:
 <code>наушники sony до 5000</code>
@@ -35,7 +46,9 @@ pub(super) const HELP: &str = "Напишите, что ищете, — приш
 <code>наушники sony по скидке</code> — сначала с самой большой скидкой
 <code>наушники sony цена-качество</code> — и недорого, и хорошо оценено многими покупателями
 
-Слежками, заведёнными в окне программы, можно управлять отсюда:
+Под ответом есть кнопки: показать ещё, пересобрать по скидке или рейтингу, не заходя на сайт снова, и завести слежку на этот запрос. Под находкой слежки — кнопка «Мимо».
+
+Слежками можно управлять отсюда:
 /watches — список с номерами и итогами проверок
 <code>/pause 3</code> — пауза, <code>/resume 3</code> — снова следить, <code>/check 3</code> — проверить сейчас
 /status — открыт ли браузер программы и когда площадки последний раз отвечали";
@@ -150,13 +163,13 @@ fn source_line(source: SourceKind, report: &SourceReport) -> String {
     let pause = match report.pause {
         Some(Pause::Until(until)) => format!(
             "\nСлежки {} ждут до {} после проверки «я не робот».",
-            source.title(),
+            source.genitive(),
             until.format("%H:%M")
         ),
         Some(Pause::UntilManualCheck) => format!(
             "\nСлежки {} остановлены после трёх проверок «я не робот» подряд — пройдите проверку в окне браузера \
              и нажмите «Проверить сейчас» (или /check N).",
-            source.title()
+            source.genitive()
         ),
         None => String::new(),
     };
@@ -198,40 +211,203 @@ pub(super) fn access_denied(user_id: u64) -> String {
     format!("Доступ закрыт. Ваш Telegram ID: {user_id}. Впишите его в ALLOWED_USERS в файле .env и перезапустите бота.")
 }
 
-pub(super) fn searching(query: &str, source: &str) -> String {
-    format!("Ищу «{query}» на {source}…")
+pub(super) fn searching(query: &str, sources: &[&str]) -> String {
+    let names = match sources {
+        [first @ .., last] if !first.is_empty() => format!("{} и {last}", first.join(", ")),
+        _ => sources.join(""),
+    };
+    format!("Ищу «{query}»: {names}…")
 }
 
-pub(super) fn findings(request: &SearchRequest, findings: &Findings, top: usize) -> String {
+/// Часть ответа на поиск и сколько предложений в неё вошло: длинные названия могут упереться в предел сообщения.
+pub(super) struct Page {
+    pub(super) text: String,
+    pub(super) shown: usize,
+}
+
+/// Какие кнопки нужны под ответом. `more` — сколько предложений покажет «Ещё».
+pub(super) struct SearchActions {
+    pub(super) more: Option<usize>,
+    pub(super) by_discount: bool,
+    pub(super) good_rating: bool,
+}
+
+pub(super) fn search_keyboard(key: u64, actions: &SearchActions) -> InlineKeyboardMarkup {
+    let button = |label: String, press: Press| InlineKeyboardButton::callback(label, press.data());
+    let more: Vec<_> = actions
+        .more
+        .map(|count| button(format!("Ещё {count}"), Press::More(key)))
+        .into_iter()
+        .collect();
+    let mut narrowing = Vec::new();
+    if actions.by_discount {
+        narrowing.push(button("По скидке".to_string(), Press::ByDiscount(key)));
+    }
+    if actions.good_rating {
+        narrowing.push(button("Рейтинг от 4.5".to_string(), Press::GoodRating(key)));
+    }
+    let watch = vec![button("Следить".to_string(), Press::Watch(key))];
+    InlineKeyboardMarkup::new([more, narrowing, watch].into_iter().filter(|row| !row.is_empty()))
+}
+
+/// Кнопки «Мимо» под уведомлением с находками: по одной на находку, с ценой и началом названия.
+pub(super) fn alert_keyboard(alert: &Alert<'_>) -> Option<InlineKeyboardMarkup> {
+    let (Alert::Started { deals, .. } | Alert::NewDeals { deals, .. }) = alert else {
+        return None;
+    };
+    let rows: Vec<Vec<InlineKeyboardButton>> = deals
+        .iter()
+        .take(MISS_BUTTONS)
+        .map(|deal| {
+            let press = Press::Miss {
+                watch_id: deal.watch_id,
+                deal: deal_key(&deal.offer.url),
+            };
+            let label = format!(
+                "Мимо: {} {}",
+                rub(deal.offer.price),
+                shorten(&deal.offer.name, BUTTON_NAME_LIMIT)
+            );
+            vec![InlineKeyboardButton::callback(label, press.data())]
+        })
+        .collect();
+    (!rows.is_empty()).then(|| InlineKeyboardMarkup::new(rows))
+}
+
+pub(super) fn miss_question(deal: &Deal) -> String {
+    format!(
+        "Что не так с «{}» за {}?",
+        escape(&shorten(&deal.offer.name, NAME_LIMIT)),
+        rub(deal.offer.price)
+    )
+}
+
+pub(super) fn miss_keyboard(deal: &Deal) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(Miss::ALL.map(|miss| {
+        let press = Press::Reason {
+            watch_id: deal.watch_id,
+            deal: deal_key(&deal.offer.url),
+            miss,
+        };
+        vec![InlineKeyboardButton::callback(miss.title(), press.data())]
+    }))
+}
+
+/// Стоп-слова здесь только подсказываются: добавить их одним нажатием можно в окне программы.
+pub(super) fn missed(deal: &Deal, miss: Miss, stop_words: &[String]) -> String {
+    let words = if stop_words.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nМожет пригодиться в стоп-словах слежки: {}.",
+            escape(&stop_words.join(", "))
+        )
+    };
+    format!(
+        "«{}» — мимо, {}. Больше не пришлю.{words}",
+        escape(&shorten(&deal.offer.name, NAME_LIMIT)),
+        miss.title()
+    )
+}
+
+pub(super) fn watch_saved(name: &str) -> String {
+    note(&format!("Слежка «{name}» запущена. Список — /watches"))
+}
+
+pub(super) fn watch_refused(problems: &[String]) -> String {
+    note(&format!("Слежку не завести: {}", problems.join("; ")))
+}
+
+/// Многоточие `shorten` дописывает сверх предела.
+fn note(text: &str) -> String {
+    shorten(text, NOTE_LIMIT - 1)
+}
+
+/// Предложения с номера `from`, не больше `top`; нумерация сквозная, чтобы «Ещё» продолжало список.
+pub(super) fn page(request: &SearchRequest, findings: &Findings, from: usize, top: usize) -> Page {
     let query = escape(&request.query);
     let conditions = conditions(request);
+    let left_out = left_out(findings);
     if findings.suitable.is_empty() {
         let hint = if conditions.is_empty() {
             "Попробуйте убрать из запроса лишние слова — в названии товара должны быть все."
         } else {
             "Попробуйте убрать из запроса лишние слова или ослабить условия."
         };
-        return format!(
-            "По запросу «{query}» подходящих предложений нет (просмотрено: {}).\n{hint}",
-            findings.scanned
-        );
+        return Page {
+            text: format!(
+                "По запросу «{query}» подходящих предложений нет (просмотрено: {}).\n{hint}{left_out}",
+                findings.scanned
+            ),
+            shown: 0,
+        };
     }
 
+    let several_sources = findings
+        .suitable
+        .iter()
+        .any(|found| found.source != findings.suitable[0].source);
+    let lowest = if several_sources && request.per_unit.is_none() {
+        lowest_by_source(findings)
+    } else {
+        String::new()
+    };
     let mut text = format!(
-        "<b>{query}</b>{conditions}\nПодходят {} из {}, {}:\n",
+        "<b>{query}</b>{conditions}{lowest}\nПодходят {} из {}, {}:\n",
         findings.suitable.len(),
         findings.scanned,
         order(request, findings)
     );
-    let hint = unit_price_hint(request, findings);
-    for (index, found) in findings.suitable.iter().take(top).enumerate() {
-        let entry = offer_entry(index + 1, found);
+    let hint = unit_price_hint(request, findings) + &left_out;
+    let believable_old_price = findings.believable_old_price();
+    let mut shown = 0;
+    for (index, found) in findings.suitable.iter().enumerate().skip(from).take(top) {
+        let entry = offer_entry(index + 1, found, several_sources, believable_old_price);
         if text.chars().count() + entry.chars().count() + hint.chars().count() > MESSAGE_LIMIT {
             break;
         }
         text += &entry;
+        shown += 1;
     }
-    text + &hint
+    Page {
+        text: text + &hint,
+        shown,
+    }
+}
+
+/// Самая низкая цена каждой площадки, от дешёвой к дорогой: какой магазин дешевле, видно без чтения списка.
+/// При цене за единицу не показывается: самая дешёвая пачка там ни о чём не говорит.
+fn lowest_by_source(findings: &Findings) -> String {
+    let mut lowest: Vec<(u64, SourceKind)> = Vec::new();
+    for found in &findings.suitable {
+        match lowest.iter_mut().find(|(_, source)| *source == found.source) {
+            Some((price, _)) => *price = found.offer.price.min(*price),
+            None => lowest.push((found.offer.price, found.source)),
+        }
+    }
+    lowest.sort_by_key(|&(price, _)| price);
+    let line: Vec<String> = lowest
+        .iter()
+        .map(|&(price, source)| format!("{} {}", source.title(), rub(price)))
+        .collect();
+    format!("\nСамые низкие цены: {}", line.join(" · "))
+}
+
+/// Площадки, которых нет в ответе: без оговорки список выглядел бы полным.
+fn left_out(findings: &Findings) -> String {
+    findings
+        .failed
+        .iter()
+        .map(|(source, error)| {
+            let reason = match error {
+                SourceError::Captcha => "просит проверку «я не робот» в окне браузера программы".to_string(),
+                SourceError::NotReady => "страница не открылась".to_string(),
+                SourceError::Failed(error) => escape(&format!("{error:#}")),
+            };
+            format!("\n⚠️ Без {}: {reason}", source.genitive())
+        })
+        .collect::<Vec<_>>()
+        .concat()
 }
 
 /// Как упорядочен ответ — с оговоркой, если просьбу выполнить не из чего: нет фасовки или нет скидок.
@@ -345,18 +521,29 @@ fn sample_line(place: usize, offer: &Offer) -> String {
     format!("{place}. {} — {name} — {}", rub(offer.price), offer.url)
 }
 
-pub(super) fn table_file_name(query: &str, source: &str) -> String {
+pub(super) fn table_file_name(query: &str) -> String {
     let slug: String = query
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .take(40)
         .collect();
-    format!("{}_{slug}.csv", source.to_lowercase())
+    format!("{slug}.csv")
 }
 
-fn offer_entry(place: usize, found: &Finding) -> String {
+fn offer_entry(place: usize, found: &Finding, with_source: bool, believable_old_price: Option<u64>) -> String {
     let offer = &found.offer;
+    let inflated = match (offer.old_price, believable_old_price) {
+        (Some(old), Some(ceiling)) if old > ceiling => {
+            "\n⚠️ Столько в этой выдаче никто не просит — скидка, скорее всего, на бумаге"
+        }
+        _ => "",
+    };
     let unit_price = found.unit_price.map(|price| format!(" · {price}")).unwrap_or_default();
+    let source = if with_source {
+        format!(" · {}", found.source.title())
+    } else {
+        String::new()
+    };
     let discount = match (offer.old_price, offer.discount_percent()) {
         (Some(old), Some(percent)) => format!(" <s>{}</s> −{percent}%", rub(old)),
         _ => String::new(),
@@ -368,7 +555,7 @@ fn offer_entry(place: usize, found: &Finding) -> String {
     };
     let marks = marks_line(offer);
     format!(
-        "\n{place}. <b>{price}</b>{unit_price}{discount}\n<a href=\"{url}\">{name}</a>{rating}{marks}\n",
+        "\n{place}. <b>{price}</b>{unit_price}{discount}{source}\n<a href=\"{url}\">{name}</a>{rating}{marks}{inflated}\n",
         price = rub(offer.price),
         url = escape(&offer.url),
         name = escape(&shorten(&offer.name, NAME_LIMIT)),
@@ -667,16 +854,159 @@ mod tests {
             suitable: offers
                 .into_iter()
                 .map(|offer| Finding {
+                    source: SourceKind::Ozon,
                     offer,
                     unit_price: None,
                 })
                 .collect(),
             packed_in: None,
+            failed: Vec::new(),
         }
+    }
+
+    #[test]
+    fn offers_name_their_source_only_when_there_are_several() {
+        let mut found = findings(vec![Offer::sample("Наушники", 1_000), Offer::sample("Наушники", 2_000)]);
+        let request = SearchRequest::parse("наушники");
+        assert!(!rendered(&request, &found, 10).contains(" · Ozon"));
+
+        found.suitable[1].source = SourceKind::Wildberries;
+        let text = rendered(&request, &found, 10);
+        assert!(text.contains("1\u{a0}000\u{a0}₽</b> · Ozon\n"), "{text}");
+        assert!(text.contains("2\u{a0}000\u{a0}₽</b> · Wildberries\n"), "{text}");
+    }
+
+    #[test]
+    fn silent_source_is_named_under_the_list_and_under_an_empty_answer() {
+        let failed = || vec![(SourceKind::YandexMarket, SourceError::Captcha)];
+        let request = SearchRequest::parse("наушники");
+
+        let found = Findings {
+            failed: failed(),
+            ..findings(vec![Offer::sample("Наушники", 1_000)])
+        };
+        assert!(
+            rendered(&request, &found, 10)
+                .ends_with("⚠️ Без Яндекс Маркета: просит проверку «я не робот» в окне браузера программы")
+        );
+
+        let nothing = Findings {
+            failed: failed(),
+            ..findings(Vec::new())
+        };
+        assert!(rendered(&request, &nothing, 10).contains("⚠️ Без Яндекс Маркета"));
+    }
+
+    #[test]
+    fn lowest_price_of_each_source_goes_under_the_title_cheapest_first() {
+        let mut found = findings(vec![
+            Offer::sample("Наушники", 3_000),
+            Offer::sample("Наушники", 2_000),
+            Offer::sample("Наушники", 2_500),
+        ]);
+        found.suitable[2].source = SourceKind::Wildberries;
+
+        let text = rendered(&SearchRequest::parse("наушники"), &found, 10);
+
+        assert!(
+            text.contains("\nСамые низкие цены: Ozon 2\u{a0}000\u{a0}₽ · Wildberries 2\u{a0}500\u{a0}₽\nПодходят"),
+            "{text}"
+        );
+        let per_kilogram = rendered(&SearchRequest::parse("наушники за кг"), &found, 10);
+        assert!(!per_kilogram.contains("Самые низкие цены"));
+    }
+
+    #[test]
+    fn old_price_nobody_asks_for_is_called_out() {
+        let offer = |price, old_price| Offer {
+            old_price,
+            ..Offer::sample("Наушники", price)
+        };
+        let found = findings(vec![
+            offer(1_000, Some(9_000)),
+            offer(2_000, Some(2_500)),
+            offer(2_500, None),
+            offer(3_000, None),
+            offer(4_000, None),
+        ]);
+
+        let text = rendered(&SearchRequest::parse("наушники"), &found, 10);
+
+        assert_eq!(text.matches("скидка, скорее всего, на бумаге").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn search_status_lists_where_it_goes() {
+        assert_eq!(searching("sony", &["Ozon"]), "Ищу «sony»: Ozon…");
+        assert_eq!(
+            searching("sony", &["Ozon", "Wildberries", "ДНС"]),
+            "Ищу «sony»: Ozon, Wildberries и ДНС…"
+        );
+    }
+
+    fn rendered(request: &SearchRequest, found: &Findings, top: usize) -> String {
+        page(request, found, 0, top).text
+    }
+
+    #[test]
+    fn notification_with_deals_offers_miss_for_the_first_five_only() {
+        let watch = Watch::new_draft();
+        let deals: Vec<Deal> = (0..7)
+            .map(|number| {
+                let mut found = deal(1_000 + number);
+                found.offer.url = format!("https://www.ozon.ru/product/{number}/");
+                found
+            })
+            .collect();
+        let alert = Alert::NewDeals {
+            watch: &watch,
+            deals: &deals,
+            lowest: None,
+        };
+
+        let keyboard = alert_keyboard(&alert).unwrap();
+
+        assert_eq!(keyboard.inline_keyboard.len(), 5);
+        assert!(
+            keyboard.inline_keyboard[0][0]
+                .text
+                .starts_with("Мимо: 1\u{a0}000\u{a0}₽ ")
+        );
+        assert!(alert_keyboard(&Alert::Test).is_none());
+        let nothing = Alert::NewDeals {
+            watch: &watch,
+            deals: &[],
+            lowest: None,
+        };
+        assert!(alert_keyboard(&nothing).is_none());
+    }
+
+    #[test]
+    fn miss_offers_every_reason_and_says_what_was_done() {
+        let found = deal(1_000);
+        let keyboard = miss_keyboard(&found);
+        let reasons: Vec<&str> = keyboard
+            .inline_keyboard
+            .iter()
+            .map(|row| row[0].text.as_str())
+            .collect();
+        assert_eq!(reasons, Miss::ALL.map(Miss::title));
+
+        let text = missed(&found, Miss::Fake, &["реплика".to_string()]);
+        assert!(text.contains("мимо, подделка") && text.contains("реплика"), "{text}");
+        assert!(!missed(&found, Miss::Sold, &[]).contains("стоп-словах"));
+    }
+
+    #[test]
+    fn notes_fit_the_telegram_popup() {
+        let long = "ошибка ".repeat(60);
+        assert!(watch_refused(std::slice::from_ref(&long)).chars().count() <= NOTE_LIMIT);
+        assert!(watch_saved(&long).chars().count() <= NOTE_LIMIT);
     }
 
     fn powder(name: &str, price: u64, per_kilogram: Option<u64>) -> Finding {
         Finding {
+            source: SourceKind::Ozon,
             offer: Offer::sample(name, price),
             unit_price: per_kilogram.map(|rubles| UnitPrice {
                 kopecks: rubles * 100,
@@ -694,8 +1024,9 @@ mod tests {
                 powder("Порошок Persil", 100, None),
             ],
             packed_in: Some(Unit::Kilogram),
+            failed: Vec::new(),
         };
-        let text = super::findings(&SearchRequest::parse("стиральный порошок за кг"), &found, 10);
+        let text = rendered(&SearchRequest::parse("стиральный порошок за кг"), &found, 10);
 
         assert!(text.starts_with("<b>стиральный порошок</b>\nПодходят 2 из 80, самые дешёвые за кг:"));
         assert!(text.contains("1. <b>1\u{a0}400\u{a0}₽</b> · 233\u{a0}₽/кг\n"));
@@ -709,16 +1040,16 @@ mod tests {
             packed_in: Some(Unit::Kilogram),
             ..findings(vec![Offer::sample("Порошок Persil 3 кг", 750)])
         };
-        let text = super::findings(&SearchRequest::parse("стиральный порошок"), &found, 10);
+        let text = rendered(&SearchRequest::parse("стиральный порошок"), &found, 10);
         assert!(text.ends_with("\nСравнить по цене за кг: <code>стиральный порошок за кг</code>"));
 
-        let on_sale = super::findings(&SearchRequest::parse("стиральный порошок по скидке"), &found, 10);
+        let on_sale = rendered(&SearchRequest::parse("стиральный порошок по скидке"), &found, 10);
         assert!(on_sale.ends_with("<code>стиральный порошок за кг по скидке</code>"));
     }
 
     #[test]
     fn asked_per_unit_without_pack_sizes_says_so() {
-        let text = super::findings(
+        let text = rendered(
             &SearchRequest::parse("чайник за кг"),
             &findings(vec![Offer::sample("Чайник", 1990)]),
             10,
@@ -729,7 +1060,7 @@ mod tests {
     #[test]
     fn header_names_the_order() {
         let header = |text: &str, offer: Offer| {
-            let answer = super::findings(&SearchRequest::parse(text), &findings(vec![offer]), 10);
+            let answer = rendered(&SearchRequest::parse(text), &findings(vec![offer]), 10);
             answer.lines().nth(1).unwrap().to_string()
         };
         let on_sale = Offer {
@@ -1132,7 +1463,7 @@ mod tests {
             sold_by_ozon: true,
             ..Offer::sample("Sony <WH-CH520>", 4364)
         };
-        let text = super::findings(
+        let text = rendered(
             &SearchRequest::parse("наушники sony до 5000"),
             &findings(vec![offer]),
             10,
@@ -1153,7 +1484,7 @@ mod tests {
         };
         let request =
             SearchRequest::parse("наушники sony до 5000 рейтинг от 4.5 отзывов от 100 доставка завтра только ozon");
-        let text = super::findings(&request, &findings(vec![offer]), 10);
+        let text = rendered(&request, &findings(vec![offer]), 10);
 
         assert!(text.starts_with(
             "<b>наушники sony</b>, цена до 5\u{a0}000\u{a0}₽, рейтинг от 4.5, отзывов от 100, доставка до завтра, \
@@ -1163,8 +1494,8 @@ mod tests {
 
     #[test]
     fn empty_answer_hint_depends_on_conditions() {
-        let plain = super::findings(&SearchRequest::parse("наушники"), &findings(Vec::new()), 10);
-        let strict = super::findings(
+        let plain = rendered(&SearchRequest::parse("наушники"), &findings(Vec::new()), 10);
+        let strict = rendered(
             &SearchRequest::parse("наушники рейтинг от 5"),
             &findings(Vec::new()),
             10,
@@ -1177,7 +1508,7 @@ mod tests {
     #[test]
     fn shows_at_most_top_offers() {
         let offers = (1..=5).map(|price| Offer::sample("Наушники", price)).collect();
-        let text = super::findings(&SearchRequest::parse("наушники"), &findings(offers), 3);
+        let text = rendered(&SearchRequest::parse("наушники"), &findings(offers), 3);
         assert!(text.contains("\n3. ") && !text.contains("\n4. "));
     }
 
@@ -1186,7 +1517,7 @@ mod tests {
         let offers = (1..=100)
             .map(|price| Offer::sample(&"Очень длинное название ".repeat(10), price))
             .collect();
-        let text = super::findings(&SearchRequest::parse("название"), &findings(offers), 100);
+        let text = rendered(&SearchRequest::parse("название"), &findings(offers), 100);
         assert!(text.chars().count() <= MESSAGE_LIMIT);
         assert!(text.contains("\n1. "));
     }

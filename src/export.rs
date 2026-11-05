@@ -1,7 +1,7 @@
 use crate::quantity::Unit;
 use crate::search::Finding;
 
-const HEADER: [&str; 11] = [
+const HEADER: [&str; 12] = [
     "№",
     "Название",
     "Цена",
@@ -12,6 +12,7 @@ const HEADER: [&str; 11] = [
     "Доставка",
     "Продаёт Ozon",
     "Бренд проверен",
+    "Площадка",
     "Ссылка",
 ];
 /// Колонка цены за единицу встаёт сразу за ценой — и только если сравнивали за единицу.
@@ -50,6 +51,7 @@ fn cells(number: usize, found: &Finding, with_unit_price: bool) -> Vec<String> {
         offer.delivery.clone().unwrap_or_default(),
         yes(offer.sold_by_ozon),
         yes(offer.brand_verified),
+        found.source.title().to_string(),
         offer.url.clone(),
     ];
     if with_unit_price {
@@ -78,11 +80,16 @@ fn row(cells: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::marketplace::SourceKind;
     use crate::offer::Offer;
     use crate::quantity::UnitPrice;
 
     fn found(offer: Offer, unit_price: Option<UnitPrice>) -> Finding {
-        Finding { offer, unit_price }
+        Finding {
+            source: SourceKind::Ozon,
+            offer,
+            unit_price,
+        }
     }
 
     #[test]
@@ -101,7 +108,7 @@ mod tests {
         assert!(text.ends_with("\r\n"));
         assert!(text.contains(
             "\"1\";\"Наушники \"\"Sony\"\"\";\"4364\";\"7990\";\"45\";\"4,9\";\"8834\";\"Завтра\";\"да\";\"\";\
-             \"https://example.com/1\""
+             \"Ozon\";\"https://example.com/1\""
         ));
     }
 
