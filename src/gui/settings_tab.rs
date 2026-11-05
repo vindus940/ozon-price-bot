@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{self, Color32, RichText};
 
 use super::{BAD, GOOD, WARN};
+use crate::autostart::Autostart;
 use crate::geo::GeoPoint;
 use crate::hunt::Hunter;
 use crate::marketplace::SourceKind;
@@ -19,6 +20,7 @@ pub(super) struct SettingsTab {
     token: String,
     user_id: String,
     avito_region: String,
+    autostart: Option<Autostart>,
     notice: Option<(String, Color32)>,
     test_result: Arc<Mutex<Option<String>>>,
 }
@@ -39,6 +41,7 @@ impl SettingsTab {
             user_id: saved.telegram_user_id.map(|id| id.to_string()).unwrap_or_default(),
             avito_region: saved.avito_region.clone(),
             saved,
+            autostart: Autostart::of_this_user(),
             notice: None,
             test_result: Arc::default(),
         }
@@ -54,6 +57,8 @@ impl SettingsTab {
             ui.add_space(10.0);
             self.avito_section(ui);
             ui.add_space(10.0);
+            self.autostart_section(ui);
+            ui.add_space(10.0);
             section(ui, "Где хранятся данные", |ui| {
                 ui.label(format!(
                     "Слежки, находки и настройки — в папке {}",
@@ -68,6 +73,35 @@ impl SettingsTab {
                 ui.colored_label(*color, text);
             }
         });
+    }
+
+    fn autostart_section(&mut self, ui: &mut egui::Ui) {
+        let Some(autostart) = &self.autostart else {
+            return;
+        };
+        let mut on = autostart.is_on();
+        let mut changed = false;
+        section(ui, "Запуск", |ui| {
+            changed = ui.checkbox(&mut on, "Запускать при входе в Windows").changed();
+            ui.weak(
+                "Окно откроется свёрнутым, слежки и бот начнут работать сами. Переложили программу в другую папку — \
+                 снимите галочку и поставьте снова.",
+            );
+        });
+        if changed {
+            let result = if on {
+                std::env::current_exe()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|program| autostart.turn_on(&program))
+            } else {
+                autostart.turn_off()
+            };
+            self.notice = Some(match result {
+                Ok(()) if on => ("Программа будет запускаться при входе в Windows.".to_string(), GOOD),
+                Ok(()) => ("Автозапуск выключен.".to_string(), GOOD),
+                Err(error) => (format!("Не получилось: {error:#}"), BAD),
+            });
+        }
     }
 
     fn home_section(&mut self, ui: &mut egui::Ui) {

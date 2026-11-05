@@ -1,3 +1,4 @@
+mod autostart;
 mod browser;
 mod config;
 mod export;

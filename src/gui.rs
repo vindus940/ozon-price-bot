@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, Color32, RichText};
 
+use crate::autostart::MINIMIZED_ARG;
 use crate::hunt::Hunter;
 use crate::search::OfferSearch;
 use crate::settings::UserSettings;
@@ -79,6 +80,11 @@ pub fn run(
         options,
         Box::new(|creation| {
             use_windows_font(&creation.egui_ctx);
+            if std::env::args().any(|arg| arg == MINIMIZED_ARG) {
+                creation
+                    .egui_ctx
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
             Ok(Box::new(app))
         }),
     )
