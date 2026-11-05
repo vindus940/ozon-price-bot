@@ -253,7 +253,7 @@ fn row(ui: &mut egui::Ui, found: &PricedOffer) {
             ui.colored_label(WARN, "б/у");
         }
         if found.suspicious {
-            ui.colored_label(BAD, "дешевле половины рынка");
+            ui.colored_label(BAD, "намного дешевле обычного");
         }
         ui.hyperlink_to(&found.offer.name, &found.offer.url);
     });

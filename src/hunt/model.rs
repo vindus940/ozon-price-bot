@@ -50,7 +50,8 @@ const OTHER_MODEL_WORDS: &[&str] = &[
 /// Лучше не склеить одну модель, чем склеить разные, поэтому отпечатка нет, когда уверенности нет: без слова вроде
 /// «ch520» или «128gb» и у вещей «для» модели, которые называют её целиком.
 pub(super) fn model_key(title: &str) -> Option<BTreeSet<String>> {
-    let title_words = words(title);
+    // Разъём «3.5 мм» продавцы то пишут, то нет, а числа в отпечатке считаются моделью.
+    let title_words = words(&title.replace("3.5", " ").replace("3,5", " "));
     if title_words.iter().any(|word| word == "для") {
         return None;
     }
@@ -84,6 +85,14 @@ mod tests {
         assert!(same(
             "Наушники Sony WH-CH520 Black",
             "Sony WH-CH520 Bluetooth, USB Type-C, белый"
+        ));
+    }
+
+    #[test]
+    fn audio_jack_mentioned_or_not_is_the_same_model() {
+        assert!(same(
+            "Sony Наушники с микрофоном Sony WH-1000XM6, Bluetooth, 3.5 мм, USB, черный",
+            "Наушники Sony WH-1000XM6, серый"
         ));
     }
 

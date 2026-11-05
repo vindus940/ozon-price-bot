@@ -13,6 +13,9 @@ use crate::marketplace::{SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::search::{Findings, OfferFilter, OfferSearch, SearchRequest};
 
+/// Из двух цен не понять, какая из них обычная: дешёвая может быть честной, а дорогая — перекупом.
+const OFFERS_TO_KNOW_MODEL_PRICE: usize = 3;
+
 /// Что ответил поиск цены: тот же товар со всех площадок, от дешёвого к дорогому.
 pub struct BestPrices {
     pub scanned: usize,
@@ -30,7 +33,7 @@ pub struct PricedOffer {
     pub source: SourceKind,
     pub offer: Offer,
     pub used: bool,
-    /// Дешевле половины рынка: скорее подделка или ошибка, чем выгода.
+    /// Дешевле половины обычной цены этой модели, а если она неизвестна — рынка: скорее подделка или ошибка, чем выгода.
     pub suspicious: bool,
 }
 
@@ -50,13 +53,16 @@ impl BestPrices {
     }
 
     /// Предложения одной модели разных цветов и продавцов вместе, на месте первого из них. Сами предложения не меняются:
-    /// это только вид списка. Объявления, б/у и подозрительно дешёвое не склеиваются: их цена — не цена этой модели.
+    /// это только вид списка. Объявления и б/у не склеиваются, а подозрительно дешёвое — только между собой:
+    /// их цена — не цена этой модели.
     pub fn groups(&self) -> Vec<Vec<&PricedOffer>> {
         let mut groups: Vec<Vec<&PricedOffer>> = Vec::new();
-        let mut by_model: HashMap<BTreeSet<String>, Vec<usize>> = HashMap::new();
+        let mut by_model: HashMap<(bool, BTreeSet<String>), Vec<usize>> = HashMap::new();
         for found in &self.offers {
-            let plain = !found.used && !found.suspicious && !found.source.has_used_goods();
-            let key = model_key(&found.offer.name).filter(|_| plain);
+            let plain = !found.used && !found.source.has_used_goods();
+            let key = model_key(&found.offer.name)
+                .filter(|_| plain)
+                .map(|key| (found.suspicious, key));
             let home = key.as_ref().and_then(|key| by_model.get(key)).and_then(|homes| {
                 homes
                     .iter()
@@ -265,10 +271,14 @@ fn priced(
 
     let prices: Vec<u64> = same.iter().map(|(_, offer, _)| offer.price).collect();
     let market = market.or_else(|| Market::of(&prices));
+    let usual = usual_model_prices(&same);
     let offers: Vec<PricedOffer> = same
         .into_iter()
         .map(|(source, offer, used)| PricedOffer {
-            suspicious: market.is_some_and(|market| suspiciously_cheap(market.median, offer.price)),
+            suspicious: model_key(&offer.name)
+                .and_then(|key| usual.get(&key).copied())
+                .or(market.map(|market| market.median))
+                .is_some_and(|usual| suspiciously_cheap(usual, offer.price)),
             source,
             offer,
             used,
@@ -283,6 +293,27 @@ fn priced(
         lowest,
         failed,
     }
+}
+
+/// Обычная цена каждой модели в магазинах. На широком запросе рынок один на все модели, и копия дорогой модели за 4 500 ₽
+/// выглядит честной ценой рядом с дешёвыми моделями (WH-1000XM6 при настоящих 25 000 ₽, 05.11.2026). Берётся верхняя
+/// из двух средних цен: копий бывает столько же, сколько настоящих. Выброс вверх на неё не влияет, поэтому честная
+/// цена рядом с одним перекупом подозрительной не становится.
+fn usual_model_prices(offers: &[(SourceKind, Offer, bool)]) -> HashMap<BTreeSet<String>, u64> {
+    let mut prices: HashMap<BTreeSet<String>, Vec<u64>> = HashMap::new();
+    for (source, offer, used) in offers {
+        if let Some(key) = model_key(&offer.name).filter(|_| !used && !source.has_used_goods()) {
+            prices.entry(key).or_default().push(offer.price);
+        }
+    }
+    prices
+        .into_iter()
+        .filter(|(_, prices)| prices.len() >= OFFERS_TO_KNOW_MODEL_PRICE)
+        .map(|(key, mut prices)| {
+            prices.sort_unstable();
+            (key, prices[prices.len() / 2])
+        })
+        .collect()
 }
 
 fn lowest_by_source(offers: &[PricedOffer]) -> Vec<(SourceKind, u64)> {
@@ -687,6 +718,115 @@ mod tests {
         assert_eq!(groups, [vec![1_000], vec![2_001, 2_100]]);
     }
 
+    fn broad_query(offers: Vec<Finding>) -> BestPrices {
+        best_prices(Category::Any, &SearchRequest::parse("sony"), &findings(offers), false)
+    }
+
+    fn cheap_models_around_a_copy() -> Vec<Finding> {
+        vec![
+            found(SourceKind::Ozon, "Наушники Sony WI-C100", 4_300),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6", 4_500),
+            found(SourceKind::Ozon, "Наушники Sony WI-C310", 4_600),
+            found(SourceKind::Ozon, "Наушники Sony WH-CH520", 4_700),
+            found(SourceKind::Ozon, "Наушники Sony WI-XB400", 4_800),
+            found(SourceKind::Wildberries, "Наушники Sony WH-1000XM6", 25_000),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6 серые", 30_000),
+        ]
+    }
+
+    #[test]
+    fn copy_of_an_expensive_model_is_suspicious_though_it_looks_fine_for_the_market() {
+        let prices = broad_query(cheap_models_around_a_copy());
+
+        let suspicious: Vec<u64> = prices
+            .offers
+            .iter()
+            .filter(|found| found.suspicious)
+            .map(|found| found.offer.price)
+            .collect();
+        assert_eq!(prices.market.unwrap().median, 4_700);
+        assert_eq!(suspicious, [4_500]);
+    }
+
+    #[test]
+    fn copy_is_not_the_lowest_price_of_its_source_nor_the_best_one() {
+        let mut offers = cheap_models_around_a_copy();
+        offers.remove(0);
+
+        let prices = broad_query(offers);
+
+        assert_eq!(prices.best().unwrap().offer.price, 4_600);
+        assert!(prices.lowest.contains(&(SourceKind::Ozon, 4_600)));
+    }
+
+    #[test]
+    fn cheap_model_is_judged_by_its_own_price_and_not_by_the_market_of_dearer_ones() {
+        let prices = broad_query(vec![
+            found(SourceKind::Ozon, "Наушники Sony WH-CH520", 4_300),
+            found(SourceKind::Wildberries, "Наушники Sony WH-CH520", 4_400),
+            found(SourceKind::Dns, "Наушники Sony WH-CH520", 4_500),
+            found(SourceKind::Ozon, "Наушники Sony WF-C710N", 9_000),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM5", 18_000),
+            found(SourceKind::Wildberries, "Наушники Sony WH-1000XM6", 25_000),
+            found(SourceKind::Dns, "Наушники Sony WH-1000XM4", 26_000),
+        ]);
+
+        assert_eq!(prices.market.unwrap().median, 9_000);
+        assert!(prices.offers.iter().all(|found| !found.suspicious));
+    }
+
+    #[test]
+    fn single_overpriced_seller_does_not_make_honest_prices_suspicious() {
+        let prices = broad_query(vec![
+            found(SourceKind::Ozon, "Наушники Sony WH-CH520", 3_000),
+            found(SourceKind::Wildberries, "Наушники Sony WH-CH520", 3_100),
+            found(SourceKind::Dns, "Наушники Sony WH-CH520", 9_000),
+        ]);
+
+        assert!(prices.offers.iter().all(|found| !found.suspicious));
+    }
+
+    #[test]
+    fn two_prices_of_a_model_do_not_tell_which_is_usual() {
+        let prices = broad_query(vec![
+            found(SourceKind::Ozon, "Наушники Sony WH-CH520", 3_000),
+            found(SourceKind::Wildberries, "Наушники Sony WH-CH520", 9_000),
+        ]);
+
+        assert!(prices.offers.iter().all(|found| !found.suspicious));
+    }
+
+    #[test]
+    fn cheap_ad_is_not_compared_with_the_model_and_does_not_drag_its_price() {
+        let prices = broad_query(vec![
+            found(SourceKind::Avito, "Наушники Sony WH-1000XM6", 2_000),
+            found(SourceKind::Avito, "Наушники Sony WH-1000XM6", 2_100),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6", 4_000),
+            found(SourceKind::Wildberries, "Наушники Sony WH-1000XM6", 25_000),
+            found(SourceKind::Dns, "Наушники Sony WH-1000XM6", 26_000),
+        ]);
+
+        let ozon = prices
+            .offers
+            .iter()
+            .find(|found| found.source == SourceKind::Ozon)
+            .unwrap();
+        assert!(ozon.suspicious, "обычная цена — по магазинам, а не по объявлениям");
+    }
+
+    #[test]
+    fn copies_of_a_model_stand_together_apart_from_the_real_ones() {
+        let groups = grouped(vec![
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6", 4_500),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6 черные", 4_600),
+            found(SourceKind::Wildberries, "Наушники Sony WH-1000XM6", 25_000),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6 серые", 26_000),
+            found(SourceKind::Dns, "Наушники Sony WH-1000XM6", 27_000),
+        ]);
+
+        assert_eq!(groups, [vec![4_500, 4_600], vec![25_000, 26_000, 27_000]]);
+    }
+
     #[test]
     fn ads_used_and_suspicious_stay_apart_from_the_model() {
         let shop = "Наушники Sony WH-CH520";
@@ -876,12 +1016,20 @@ mod tests {
 
         let groups = prices.groups();
         println!("предложений {}, в списке {}", prices.offers.len(), groups.len());
-        for group in groups.iter().filter(|group| group.len() > 1) {
-            println!("---");
+        for group in groups.iter().filter(|group| group.len() > 1 || group[0].suspicious) {
+            println!(
+                "---{}",
+                if group[0].suspicious {
+                    " подозрительно"
+                } else {
+                    ""
+                }
+            );
             for found in group {
                 println!("{:?} {} ₽ {}", found.source, found.offer.price, found.offer.name);
             }
         }
+        println!("лучшая цена: {:?}", prices.best().map(|found| &found.offer.name));
         assert!(groups.len() < prices.offers.len());
     }
 
