@@ -10,7 +10,7 @@ use crate::hunt::failure_reason;
 use crate::hunt::market::Market;
 use crate::marketplace::{SourceError, SourceKind};
 use crate::offer::Offer;
-use crate::search::{Findings, OfferSearch, SearchRequest};
+use crate::search::{Findings, OfferFilter, OfferSearch, SearchRequest};
 
 /// Что ответил поиск цены: тот же товар со всех площадок, от дешёвого к дорогому.
 pub struct BestPrices {
@@ -55,10 +55,17 @@ pub struct PriceProgress {
     pub waiting: Vec<SourceKind>,
 }
 
-/// Поиск цены в два прохода. Популярная выдача показывает рынок, но самое дешёвое бывает в ней далеко: поэтому второй
-/// проход — от дешёвых, в коридоре от половины рынка (ниже — чехлы и подделки) до самого рынка. Яндекс Маркет
-/// спрашивается один раз, сразу вторым проходом: коридор ему дают остальные.
-/// `report` получает промежуточный итог после ответа каждой площадки.
+/// Как идёт поиск бота: сообщение «Ищу…» обновляется, иначе за второй проход кажется, что бот завис.
+#[derive(Debug, PartialEq)]
+pub struct OffersProgress {
+    /// Сколько уже подошло под запрос со всеми его условиями.
+    pub suitable: usize,
+    pub waiting: Vec<SourceKind>,
+    /// Первые ответы получены, площадки читают выдачу от дешёвых.
+    pub deeper: bool,
+}
+
+/// Поиск цены для окна: `report` получает промежуточный итог после ответа каждой площадки.
 pub async fn hunt_best_prices(
     search: &OfferSearch,
     request: &SearchRequest,
@@ -66,16 +73,57 @@ pub async fn hunt_best_prices(
     new_only: bool,
     report: &(dyn Fn(PriceProgress) + Send + Sync),
 ) -> Result<BestPrices, (SourceKind, SourceError)> {
-    let (regular, once) = search.split_asked_once();
-    if regular.is_empty() {
-        return Ok(best_prices(category, request, &once.find(request).await?, new_only));
-    }
     let tell = |findings: &Findings, market, waiting: &[SourceKind]| {
         report(PriceProgress {
             prices: priced(category, request, findings, new_only, market),
             waiting: waiting.to_vec(),
         });
     };
+    let (findings, market) = two_passes(search, request, category, new_only, tell).await?;
+    Ok(priced(category, request, &findings, new_only, market))
+}
+
+/// Поиск для бота: тот же второй проход, но ответ — весь список, а не лучшая цена. Категории бот не спрашивает,
+/// поэтому рынок — по всему, что подошло по словам. «По скидке» и «за кг» спрашивают не про самую низкую цену
+/// предложения: заход на площадки ради них был бы лишним.
+pub async fn hunt_offers(
+    search: &OfferSearch,
+    request: &SearchRequest,
+    report: impl Fn(OffersProgress) + Send + Sync,
+) -> Result<Findings, (SourceKind, SourceError)> {
+    if !request.wants_lowest_price() {
+        return search.find(request).await;
+    }
+    let wanted = OfferFilter::new(request);
+    let tell = |findings: &Findings, market: Option<Market>, waiting: &[SourceKind]| {
+        report(OffersProgress {
+            suitable: findings
+                .suitable
+                .iter()
+                .filter(|found| wanted.accepts(&found.offer))
+                .count(),
+            waiting: waiting.to_vec(),
+            deeper: market.is_some(),
+        });
+    };
+    let (findings, _) = two_passes(search, request, Category::Any, false, tell).await?;
+    Ok(findings)
+}
+
+/// Популярная выдача показывает рынок, но самое дешёвое бывает в ней далеко: поэтому второй проход — от дешёвых,
+/// в коридоре от половины рынка (ниже — чехлы и подделки) до самого рынка. Яндекс Маркет спрашивается один раз,
+/// сразу вторым проходом: коридор ему дают остальные.
+async fn two_passes(
+    search: &OfferSearch,
+    request: &SearchRequest,
+    category: Category,
+    new_only: bool,
+    tell: impl Fn(&Findings, Option<Market>, &[SourceKind]) + Send + Sync,
+) -> Result<(Findings, Option<Market>), (SourceKind, SourceError)> {
+    let (regular, once) = search.split_asked_once();
+    if regular.is_empty() {
+        return Ok((once.find(request).await?, None));
+    }
 
     let mut findings = Findings::default();
     let mut waiting = regular.kinds(request);
@@ -83,7 +131,7 @@ pub async fn hunt_best_prices(
         .iter()
         .map(|&kind| {
             let source = regular.only(&[kind]);
-            async move { (kind, source.find(request).await) }
+            async move { (kind, source.find_for_market(request).await) }
         })
         .collect();
     while let Some((kind, answer)) = answers.next().await {
@@ -100,21 +148,16 @@ pub async fn hunt_best_prices(
 
     // Рынок — только по популярной выдаче: второй проход нарочно собирает дешёвое и занизил бы его.
     let market = market_of(category, request, &findings, new_only);
-    match market {
-        Some(market) => {
+    match market.and_then(|market| corridor(request, market)) {
+        Some((from, to)) => {
             let mut waiting = search.kinds(request);
             waiting.retain(|kind| kind.reads_cheapest_first());
-            tell(&findings, Some(market), &waiting);
+            tell(&findings, market, &waiting);
             let mut answers: FuturesUnordered<_> = waiting
                 .iter()
                 .map(|&kind| {
                     let source = search.only(&[kind]);
-                    async move {
-                        (
-                            kind,
-                            source.find_cheapest(request, market.median / 2, market.median).await,
-                        )
-                    }
+                    async move { (kind, source.find_cheapest(request, from, to).await) }
                 })
                 .collect();
             while let Some((kind, mut deeper)) = answers.next().await {
@@ -122,7 +165,7 @@ pub async fn hunt_best_prices(
                 // Площадка уже ответила первым проходом — её предложения в списке, и пугать оговоркой незачем.
                 deeper.failed.retain(|(source, _)| source.is_asked_once());
                 findings.merge(deeper, request);
-                tell(&findings, Some(market), &waiting);
+                tell(&findings, market, &waiting);
             }
         }
         None if !once.is_empty() => match once.find(request).await {
@@ -131,7 +174,16 @@ pub async fn hunt_best_prices(
         },
         None => {}
     }
-    Ok(priced(category, request, &findings, new_only, market))
+    findings.refine(request);
+    Ok((findings, market))
+}
+
+/// Коридор второго прохода в пределах цены из запроса. Цена за килограмм рублями за пачку не ограничивается,
+/// а если всё заказанное дешевле половины рынка, искать в коридоре нечего.
+fn corridor(request: &SearchRequest, market: Market) -> Option<(u64, u64)> {
+    let from = (market.median / 2).max(request.price.min.unwrap_or(0));
+    let to = market.median.min(request.price.max.unwrap_or(u64::MAX));
+    (request.per_unit.is_none() && from <= to).then_some((from, to))
 }
 
 fn market_of(category: Category, request: &SearchRequest, findings: &Findings, new_only: bool) -> Option<Market> {
@@ -143,10 +195,6 @@ fn market_of(category: Category, request: &SearchRequest, findings: &Findings, n
         .map(|found| found.offer.price)
         .collect();
     Market::of(&prices)
-}
-
-fn best_prices(category: Category, request: &SearchRequest, findings: &Findings, new_only: bool) -> BestPrices {
-    priced(category, request, findings, new_only, None)
 }
 
 /// Отбор тот же, что у слежек: иначе самым дешёвым «товаром» всегда окажется чехол к нему.
@@ -165,10 +213,12 @@ fn priced(
         .map(|(source, error)| (*source, failure_reason(*source, error)))
         .collect();
 
+    // Пока идёт поиск, в находках есть и то, что нужно только для рынка.
+    let wanted = OfferFilter::new(request);
     let mut seen = HashSet::new();
     let mut other_product = 0;
     let mut same = Vec::new();
-    for found in &findings.suitable {
+    for found in findings.suitable.iter().filter(|found| wanted.accepts(&found.offer)) {
         if !category.accepts(&request.query, &found.offer) {
             other_product += 1;
             continue;
@@ -244,6 +294,21 @@ mod tests {
 
     fn request() -> SearchRequest {
         SearchRequest::parse("наушники sony wh-ch520")
+    }
+
+    fn best_prices(category: Category, request: &SearchRequest, findings: &Findings, new_only: bool) -> BestPrices {
+        priced(category, request, findings, new_only, None)
+    }
+
+    fn popular_and_hidden() -> FakeSource {
+        FakeSource::returning(sony(&[3_900, 4_000, 4_100, 4_200, 4_400])).with_cheapest(sony(&[2_500]))
+    }
+
+    async fn offers_for(search: &OfferSearch, text: &str) -> Vec<u64> {
+        let findings = hunt_offers(search, &SearchRequest::parse(text), |_| {})
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+        findings.suitable.iter().map(|found| found.offer.price).collect()
     }
 
     fn market_of_five() -> Vec<Finding> {
@@ -362,6 +427,134 @@ mod tests {
             ["наушники sony wh-ch520", "наушники sony wh-ch520 2050..4100"],
             "коридор — от половины рынка до рынка"
         );
+    }
+
+    #[tokio::test]
+    async fn bot_gets_the_cheapest_hidden_behind_popular_offers_on_top_of_the_whole_list() {
+        let source = popular_and_hidden();
+        let asked = source.queries();
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(source))]);
+
+        let prices = offers_for(&search, "наушники sony wh-ch520").await;
+
+        assert_eq!(prices, [2_500, 3_900, 4_000, 4_100, 4_200, 4_400]);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["наушники sony wh-ch520", "наушники sony wh-ch520 2050..4100"]
+        );
+    }
+
+    #[tokio::test]
+    async fn bot_hears_who_it_waits_for_and_counts_only_what_was_asked() {
+        let ozon = popular_and_hidden();
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(ozon))]);
+        let request = SearchRequest::parse("наушники sony wh-ch520 до 3000");
+        let steps = std::sync::Mutex::new(Vec::new());
+
+        let answer = hunt_offers(&search, &request, |step| steps.lock().unwrap().push(step)).await;
+
+        assert!(answer.is_ok());
+        let step = |suitable, waiting: &[SourceKind], deeper| OffersProgress {
+            suitable,
+            waiting: waiting.to_vec(),
+            deeper,
+        };
+        assert_eq!(
+            steps.into_inner().unwrap(),
+            [
+                step(0, &[], false),
+                step(0, &[SourceKind::Ozon], true),
+                step(1, &[], true)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn price_limit_below_the_market_still_finds_the_market_and_narrows_the_corridor() {
+        let source = popular_and_hidden();
+        let asked = source.queries();
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(source))]);
+
+        let prices = offers_for(&search, "наушники sony wh-ch520 до 3000").await;
+
+        assert_eq!(prices, [2_500], "популярное дороже 3000 нужно рынку, но не ответу");
+        assert_eq!(asked.lock().unwrap()[1], "наушники sony wh-ch520 2050..3000");
+    }
+
+    #[tokio::test]
+    async fn window_shows_only_what_was_asked_while_the_market_is_counted_over_everything() {
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(popular_and_hidden()))]);
+        let shown = std::sync::Mutex::new(Vec::new());
+        let request = SearchRequest::parse("наушники sony wh-ch520 до 3000");
+
+        let prices = hunt_best_prices(&search, &request, Category::Electronics, false, &|progress| {
+            shown.lock().unwrap().push(progress.prices.offers.len());
+        })
+        .await
+        .unwrap_or_else(|_| panic!("все площадки молчат"));
+
+        assert_eq!(prices.market.unwrap().median, 4_100);
+        assert_eq!(prices.best().unwrap().offer.price, 2_500);
+        assert_eq!(shown.into_inner().unwrap(), [0, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn limit_far_below_the_market_leaves_nothing_to_look_for_in_the_corridor() {
+        let source = popular_and_hidden();
+        let asked = source.queries();
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(source))]);
+
+        let prices = offers_for(&search, "наушники sony wh-ch520 до 1000").await;
+
+        assert!(prices.is_empty());
+        assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn asking_for_a_discount_or_a_price_per_kilo_does_not_go_for_the_cheapest() {
+        for text in ["наушники sony wh-ch520 по скидке", "наушники sony wh-ch520 за кг"] {
+            let source = popular_and_hidden();
+            let asked = source.queries();
+            let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(source))]);
+
+            offers_for(&search, text).await;
+
+            assert_eq!(asked.lock().unwrap().len(), 1, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn price_per_kilo_in_the_window_has_no_corridor_in_rubles_per_pack() {
+        let source = popular_and_hidden();
+        let asked = source.queries();
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(source))]);
+        let request = SearchRequest::parse("наушники sony wh-ch520 за кг");
+
+        let found = hunt_best_prices(&search, &request, Category::Any, false, &|_| {}).await;
+
+        assert!(found.is_ok());
+        assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_ozon_keeps_to_its_filter_after_both_passes() {
+        let sold_by_ozon = |price| Offer {
+            sold_by_ozon: true,
+            ..sony(&[price]).remove(0)
+        };
+        let source = FakeSource::returning(sony(&[3_900, 4_000, 4_100, 4_200, 4_400]))
+            .with_cheapest(vec![sold_by_ozon(2_600), sony(&[2_500]).remove(0)]);
+        let wildberries = FakeSource::returning(Vec::new());
+        let visits = wildberries.queries();
+        let search = OfferSearch::new(vec![
+            (SourceKind::Ozon, Arc::new(source)),
+            (SourceKind::Wildberries, Arc::new(wildberries)),
+        ]);
+
+        let prices = offers_for(&search, "наушники sony wh-ch520 только ozon").await;
+
+        assert_eq!(prices, [2_600]);
+        assert!(visits.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -540,6 +733,43 @@ mod tests {
 
         assert!(prices.market.is_none());
         assert_eq!(prices.best().unwrap().offer.price, 900);
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живые Ozon, Wildberries и ДНС: cargo test -- --ignored --test-threads=1"]
+    async fn bot_looks_below_the_market_on_live_sites() {
+        use crate::marketplace::dns::Dns;
+        use crate::marketplace::ozon::Ozon;
+        use crate::marketplace::wildberries::Wildberries;
+
+        let browser = crate::browser::test_browser();
+        let search = OfferSearch::new(vec![
+            (SourceKind::Ozon, Arc::new(Ozon::new(Arc::clone(&browser), 3))),
+            (
+                SourceKind::Wildberries,
+                Arc::new(Wildberries::new(Arc::clone(&browser))),
+            ),
+            (SourceKind::Dns, Arc::new(Dns::new(browser))),
+        ]);
+        let request = SearchRequest::parse("наушники sony wh-ch520 до 3500");
+        let started = std::time::Instant::now();
+
+        let findings = hunt_offers(&search, &request, |step| println!("{step:?}"))
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+
+        println!(
+            "за {:?}: просмотрено {}, подошло {}, не ответили {:?}",
+            started.elapsed(),
+            findings.scanned,
+            findings.suitable.len(),
+            findings.failed
+        );
+        for found in findings.suitable.iter().take(5) {
+            println!("{:?} {} ₽ {}", found.source, found.offer.price, found.offer.name);
+        }
+        assert!(!findings.suitable.is_empty());
+        assert!(findings.suitable.iter().all(|found| found.offer.price <= 3_500));
     }
 
     #[tokio::test]

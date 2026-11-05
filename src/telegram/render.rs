@@ -4,7 +4,7 @@ use super::WatchAction;
 use super::buttons::{Press, deal_key};
 use crate::format::{price_drop, rub, signed_rub, tile_marks};
 use crate::health::{Health, Problem};
-use crate::hunt::{Alert, Deal, Goal, Lowest, Miss, Outcome, Pause, RunStatus, SourceReport, Watch};
+use crate::hunt::{Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SourceReport, Watch};
 use crate::marketplace::{Product, SiteStatus, SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
@@ -212,11 +212,24 @@ pub(super) fn access_denied(user_id: u64) -> String {
 }
 
 pub(super) fn searching(query: &str, sources: &[&str]) -> String {
-    let names = match sources {
-        [first @ .., last] if !first.is_empty() => format!("{} и {last}", first.join(", ")),
-        _ => sources.join(""),
+    format!("Ищу «{query}»: {}…", listed(sources))
+}
+
+pub(super) fn search_progress(query: &str, progress: &OffersProgress) -> String {
+    let names: Vec<&str> = progress.waiting.iter().map(|source| source.title()).collect();
+    let doing = match (names.is_empty(), progress.deeper) {
+        (true, _) => "заканчиваю".to_string(),
+        (false, true) => format!("смотрю от дешёвых: {}", listed(&names)),
+        (false, false) => format!("жду: {}", listed(&names)),
     };
-    format!("Ищу «{query}»: {names}…")
+    format!("Ищу «{query}». Подходит: {}, {doing}…", progress.suitable)
+}
+
+fn listed(names: &[&str]) -> String {
+    match names {
+        [first @ .., last] if !first.is_empty() => format!("{} и {last}", first.join(", ")),
+        _ => names.join(""),
+    }
 }
 
 /// Часть ответа на поиск и сколько предложений в неё вошло: длинные названия могут упереться в предел сообщения.
@@ -942,6 +955,30 @@ mod tests {
             searching("sony", &["Ozon", "Wildberries", "ДНС"]),
             "Ищу «sony»: Ozon, Wildberries и ДНС…"
         );
+    }
+
+    #[test]
+    fn search_progress_says_what_is_found_and_what_is_going_on() {
+        let progress = |waiting: &[SourceKind], deeper| {
+            search_progress(
+                "sony",
+                &OffersProgress {
+                    suitable: 22,
+                    waiting: waiting.to_vec(),
+                    deeper,
+                },
+            )
+        };
+
+        assert_eq!(
+            progress(&[SourceKind::Wildberries, SourceKind::Dns], false),
+            "Ищу «sony». Подходит: 22, жду: Wildberries и ДНС…"
+        );
+        assert_eq!(
+            progress(&[SourceKind::Ozon], true),
+            "Ищу «sony». Подходит: 22, смотрю от дешёвых: Ozon…"
+        );
+        assert_eq!(progress(&[], true), "Ищу «sony». Подходит: 22, заканчиваю…");
     }
 
     fn rendered(request: &SearchRequest, found: &Findings, top: usize) -> String {

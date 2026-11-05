@@ -114,6 +114,22 @@ impl SearchRequest {
             },
         }
     }
+
+    /// Просят самую низкую цену предложения, а не самую большую скидку или цену за килограмм.
+    pub fn wants_lowest_price(&self) -> bool {
+        self.order == Order::Cheapest && self.per_unit.is_none()
+    }
+
+    /// Тот же запрос без условий к цене, оценке и магазину: остаются слова и порядок.
+    pub fn by_words_only(&self) -> Self {
+        Self {
+            price: PriceRange::default(),
+            min_rating: None,
+            min_reviews: None,
+            shop: ShopConditions::default(),
+            ..self.clone()
+        }
+    }
 }
 
 fn order(words: &str) -> Order {

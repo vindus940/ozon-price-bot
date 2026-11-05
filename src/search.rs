@@ -90,13 +90,27 @@ impl OfferSearch {
     /// Площадки опрашиваются одновременно, у каждой своя вкладка. Ошибка — только если не нашлось нигде и хоть одна
     /// площадка не ответила; иначе ответ из того, что есть, а не ответившие — в `Findings::failed`.
     pub async fn find(&self, request: &SearchRequest) -> Result<Findings, (SourceKind, SourceError)> {
+        self.popular(request, request).await
+    }
+
+    /// То же, но отбор только по словам запроса: рынок считается по всем похожим, а цена, рейтинг и условия к магазину
+    /// отбирают кандидатов потом (`Findings::refine`). Иначе «до 3000» оставило бы без рынка того, кто ищет ниже него.
+    pub async fn find_for_market(&self, request: &SearchRequest) -> Result<Findings, (SourceKind, SourceError)> {
+        self.popular(request, &request.by_words_only()).await
+    }
+
+    async fn popular(
+        &self,
+        request: &SearchRequest,
+        kept_by: &SearchRequest,
+    ) -> Result<Findings, (SourceKind, SourceError)> {
         let (offers, mut failed) = self
             .gather(request, |source| source.search(&request.query, Scope::default()))
             .await;
         if offers.is_empty() && !failed.is_empty() {
             return Err(failed.remove(0));
         }
-        Ok(arranged(request, offers, failed))
+        Ok(arranged(kept_by, offers, failed))
     }
 
     /// От дешёвых к дорогим в коридоре цен — там, где площадка так умеет.
@@ -155,23 +169,12 @@ fn arranged(
 ) -> Findings {
     let scanned = offers.len();
     let filter = OfferFilter::new(request);
-    let measured: Vec<(SourceKind, Offer, Option<Quantity>)> = offers
+    let suitable: Vec<Finding> = offers
         .into_iter()
         .filter(|(_, offer)| filter.accepts(offer))
-        .map(|(kind, offer)| {
-            let quantity = Quantity::in_title(&offer.name);
-            (kind, offer, quantity)
-        })
-        .collect();
-    let packed_in = most_common_unit(measured.iter().map(|(_, _, quantity)| *quantity))
-        .filter(|&(_, count)| count * 2 > measured.len())
-        .map(|(unit, _)| unit);
-
-    let suitable: Vec<Finding> = measured
-        .into_iter()
-        .map(|(source, offer, quantity)| Finding {
+        .map(|(source, offer)| Finding {
             source,
-            unit_price: quantity
+            unit_price: Quantity::in_title(&offer.name)
                 .filter(|quantity| Some(quantity.unit) == request.per_unit)
                 .map(|quantity| quantity.unit_price(offer.price)),
             offer,
@@ -179,10 +182,16 @@ fn arranged(
         .collect();
     Findings {
         scanned,
+        packed_in: packed_in(&suitable),
         suitable: request.order.arrange(suitable),
-        packed_in,
         failed,
     }
+}
+
+fn packed_in(suitable: &[Finding]) -> Option<Unit> {
+    most_common_unit(suitable.iter().map(|found| Quantity::in_title(&found.offer.name)))
+        .filter(|&(_, count)| count * 2 > suitable.len())
+        .map(|(unit, _)| unit)
 }
 
 impl Findings {
@@ -198,6 +207,7 @@ impl Findings {
         );
         self.failed.extend(other.failed);
         self.suitable = request.order.arrange(std::mem::take(&mut self.suitable));
+        self.packed_in = packed_in(&self.suitable);
     }
 
     /// Выше этого старая цена не похожа на настоящую: в полтора раза дороже самого дорогого, что сейчас продаётся
@@ -392,6 +402,30 @@ mod tests {
         assert_eq!(sourced(&findings), [(SourceKind::Ozon, 3000)]);
         assert!(visits.lock().unwrap().is_empty());
         assert_eq!(search.source_names(&request), ["Ozon"]);
+    }
+
+    #[tokio::test]
+    async fn market_view_keeps_what_the_price_limit_would_drop_but_not_other_words() {
+        let search = on_ozon(Arc::new(FakeSource::returning(vec![
+            Offer::sample("Наушники Sony", 4000),
+            Offer::sample("Наушники Sony с амбушюрами", 4100),
+            Offer::sample("Колонка Sony", 4200),
+        ])));
+        let request = SearchRequest::parse("наушники sony -амбушюры до 3000 рейтинг от 4.5");
+
+        let findings = search.find_for_market(&request).await.unwrap();
+
+        assert_eq!(prices(&findings), [4000]);
+    }
+
+    #[tokio::test]
+    async fn merged_passes_keep_the_hint_about_pack_sizes() {
+        let packs = powders().find(&SearchRequest::parse("persil")).await.unwrap();
+        let mut findings = Findings::default();
+
+        findings.merge(packs, &SearchRequest::parse("persil"));
+
+        assert_eq!(findings.packed_in, Some(Unit::Kilogram));
     }
 
     #[tokio::test]

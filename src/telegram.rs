@@ -7,15 +7,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, InputFile, LinkPreviewOptions, ParseMode, UserId};
+use teloxide::types::{ChatId, InputFile, LinkPreviewOptions, MessageId, ParseMode, UserId};
+use tokio::sync::watch;
 
 use self::buttons::{Answer, Answers, Press, Pressed, deal_key};
 use crate::export;
 use crate::health::ParserCheck;
-use crate::hunt::{Alert, Deal, Hunter, Notifier, RunStatus, SourceReport, Watch};
-use crate::marketplace::SourceKind;
+use crate::hunt::{Alert, Deal, Hunter, Notifier, OffersProgress, RunStatus, SourceReport, Watch, hunt_offers};
 use crate::marketplace::ozon::Ozon;
-use crate::search::{OfferSearch, SearchRequest};
+use crate::marketplace::{SourceError, SourceKind};
+use crate::search::{Findings, OfferSearch, SearchRequest};
 
 const WITHOUT_LINK_PREVIEW: LinkPreviewOptions = LinkPreviewOptions {
     is_disabled: true,
@@ -172,7 +173,7 @@ impl ChatBot {
             .send_message(chat, render::searching(&request.query, &sources))
             .await?;
 
-        match self.search.find(request).await {
+        match self.hunt_showing_progress(bot, chat, status.id, request).await {
             Ok(findings) => {
                 for (source, error) in &findings.failed {
                     log::warn!("поиск «{}»: {} не ответил — {error:#}", request.query, source.title());
@@ -201,6 +202,38 @@ impl ChatBot {
             }
         }
         Ok(())
+    }
+
+    /// Ход поиска правит сообщение «Ищу…». Последний шаг дописывается до возврата: иначе правка могла бы лечь поверх
+    /// готового ответа. Не прошедшая правка не мешает ответу.
+    async fn hunt_showing_progress(
+        &self,
+        bot: &Bot,
+        chat: ChatId,
+        status: MessageId,
+        request: &SearchRequest,
+    ) -> Result<Findings, (SourceKind, SourceError)> {
+        let (progress, mut shown) = watch::channel(String::new());
+        let hunting = async move {
+            let report = |step: OffersProgress| {
+                let text = render::search_progress(&request.query, &step);
+                progress.send_if_modified(|shown| {
+                    let changed = *shown != text;
+                    *shown = text;
+                    changed
+                });
+            };
+            hunt_offers(&self.search, request, report).await
+        };
+        let showing = async {
+            while shown.changed().await.is_ok() {
+                let text = shown.borrow_and_update().clone();
+                if let Err(error) = bot.edit_message_text(chat, status, text).await {
+                    log::debug!("ход поиска «{}» не показан: {error}", request.query);
+                }
+            }
+        };
+        tokio::join!(hunting, showing).0
     }
 
     /// Нажатие надо подтвердить в любом случае: без ответа Telegram крутит на кнопке часики.
