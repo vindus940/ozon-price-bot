@@ -153,7 +153,7 @@ impl PriceSearchTab {
             let finished = match hunt_best_prices(&search, &request, category, new_only, &report).await {
                 Ok(mut prices) => {
                     if let Some((source, price)) = prices.best().map(|best| (best.source, best.offer.price)) {
-                        let low = memory.note(&request, source, price, Local::now());
+                        let low = memory.note(&request, category, source, price, Local::now());
                         prices.price_note = low.map(|low| low.says(price));
                     }
                     Search::Done(prices)

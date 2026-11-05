@@ -499,7 +499,7 @@ impl Hunter {
             let scope = watch.scope(self.state().home);
             match source.search(&watch.query, scope).await {
                 Ok(found) => {
-                    self.state().schedule.source_answered(kind);
+                    self.state().schedule.other_shop_answered(kind, Local::now());
                     offers.extend(found);
                 }
                 Err(error) => {

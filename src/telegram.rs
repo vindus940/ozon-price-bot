@@ -15,8 +15,8 @@ use self::buttons::{Answer, Answers, Press, Pressed, deal_key};
 use crate::export;
 use crate::health::ParserCheck;
 use crate::hunt::{
-    Alert, Deal, Hunter, Notifier, OffersProgress, PriceMemory, RunStatus, SourceReport, Watch, best_shop_offer,
-    hunt_offers,
+    Alert, Category, Deal, Hunter, Notifier, OffersProgress, PriceMemory, RunStatus, SourceReport, Watch,
+    best_shop_offer, hunt_offers,
 };
 use crate::marketplace::ozon::Ozon;
 use crate::marketplace::{SourceError, SourceKind};
@@ -186,7 +186,7 @@ impl ChatBot {
                     log::warn!("поиск «{}»: {} не ответил — {error:#}", request.query, source.title());
                 }
                 if let Some((source, price)) = best_shop_offer(&findings).map(|best| (best.source, best.offer.price)) {
-                    let low = self.memory.note(request, source, price, Local::now());
+                    let low = self.memory.note(request, Category::Any, source, price, Local::now());
                     findings.price_note = low.map(|low| low.says(price));
                 }
                 let table = (!findings.suitable.is_empty())

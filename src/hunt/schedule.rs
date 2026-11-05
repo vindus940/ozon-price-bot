@@ -67,6 +67,8 @@ pub struct Schedule {
     queue: VecDeque<u64>,
     checking: Option<u64>,
     captchas: HashMap<SourceKind, Captchas>,
+    /// Когда площадка отвечала как дополнительный магазин слежки: итог такой проверки записан за основным.
+    other_shops: HashMap<SourceKind, DateTime<Local>>,
 }
 
 impl Schedule {
@@ -142,6 +144,11 @@ impl Schedule {
         self.captchas.remove(&source);
     }
 
+    pub fn other_shop_answered(&mut self, source: SourceKind, at: DateTime<Local>) {
+        self.source_answered(source);
+        self.other_shops.insert(source, at);
+    }
+
     pub fn pause(&self, source: SourceKind, now: DateTime<Local>) -> Option<Pause> {
         match self.captchas.get(&source)?.pause {
             Pause::Until(until) if until <= now => None,
@@ -151,12 +158,20 @@ impl Schedule {
 
     /// Итоги проверок слежек площадки `source` одной строкой состояния.
     pub fn report(&self, watches: &[Watch], source: SourceKind, now: DateTime<Local>) -> SourceReport {
-        let own: Vec<&Watch> = watches.iter().filter(|watch| watch.source == source).collect();
-        let runs: Vec<&RunStatus> = own.iter().filter_map(|watch| self.runs.get(&watch.id)).collect();
+        let own: Vec<&Watch> = watches
+            .iter()
+            .filter(|watch| watch.source == source || watch.also_sources.contains(&source))
+            .collect();
+        let runs: Vec<&RunStatus> = own
+            .iter()
+            .filter(|watch| watch.source == source)
+            .filter_map(|watch| self.runs.get(&watch.id))
+            .collect();
         let last_success = runs
             .iter()
             .filter(|run| !matches!(run.outcome, Outcome::Failed(_)))
             .map(|run| run.at)
+            .chain(self.other_shops.get(&source).copied())
             .max();
         let failure_since = runs
             .iter()
@@ -207,6 +222,25 @@ mod tests {
             news: 0,
             hidden_suspicious: 0,
         }
+    }
+
+    #[test]
+    fn shop_that_only_helps_a_watch_is_reported_by_its_own_answers() {
+        let now = Local::now();
+        let helped = Watch {
+            also_sources: vec![SourceKind::Wildberries],
+            ..watch(1)
+        };
+        let mut schedule = Schedule::default();
+        schedule.record(1, now - Duration::minutes(30), checked());
+
+        let silent = schedule.report(std::slice::from_ref(&helped), SourceKind::Wildberries, now);
+        assert_eq!(silent.watches, 1);
+        assert_eq!(silent.last_success, None, "итог слежки — об основном магазине");
+
+        schedule.other_shop_answered(SourceKind::Wildberries, now);
+        let answered = schedule.report(std::slice::from_ref(&helped), SourceKind::Wildberries, now);
+        assert_eq!(answered.last_success, Some(now));
     }
 
     #[test]

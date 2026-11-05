@@ -5,6 +5,7 @@ use chrono::{DateTime, Duration, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::format::rub;
+use crate::hunt::category::Category;
 use crate::marketplace::SourceKind;
 use crate::search::SearchRequest;
 use crate::storage::Storage;
@@ -102,15 +103,17 @@ impl PriceMemory {
     }
 
     /// Запомнить лучшую цену запроса и сказать, какая была раньше. Запрос с условиями о цене и магазине — другой вопрос,
-    /// и сравнивать его с простым нельзя, поэтому он не запоминается.
+    /// и сравнивать его с простым нельзя, поэтому он не запоминается. Другая категория — тоже: в «Всё подряд» лучшей
+    /// ценой может быть то, что категория «Электроника» отсеяла бы как аксессуар.
     pub fn note(
         &self,
         request: &SearchRequest,
+        category: Category,
         source: SourceKind,
         price: u64,
         now: DateTime<Local>,
     ) -> Option<PastLow> {
-        let key = key_of(request)?;
+        let key = key_of(request, category)?;
         let mut points = self.points.lock().unwrap();
         let low = points.note(key, price, source, now);
         if let Err(error) = self.storage.save(FILE, &*points) {
@@ -131,7 +134,7 @@ impl PriceMemory {
 }
 
 /// Порядок слов и регистр вопрос не меняют: «Sony наушники» и «наушники sony» — один запрос.
-fn key_of(request: &SearchRequest) -> Option<String> {
+fn key_of(request: &SearchRequest, category: Category) -> Option<String> {
     let plain = *request
         == SearchRequest {
             query: request.query.clone(),
@@ -139,7 +142,7 @@ fn key_of(request: &SearchRequest) -> Option<String> {
         };
     let mut words = words(&request.query);
     words.sort();
-    (plain && !words.is_empty()).then(|| words.join(" "))
+    (plain && !words.is_empty()).then(|| format!("{category:?}: {}", words.join(" ")))
 }
 
 #[cfg(test)]
@@ -158,6 +161,8 @@ mod tests {
         Local.with_ymd_and_hms(2026, 11, day, hour, 0, 0).unwrap()
     }
 
+    const KEY: &str = "Any: sony наушники";
+
     fn sony() -> SearchRequest {
         SearchRequest::parse("наушники sony")
     }
@@ -168,12 +173,13 @@ mod tests {
         let mut first = Points::default();
         assert_eq!(first.note("a".into(), 100, SourceKind::Ozon, day(1, 10)), None);
 
-        memory.start("sony наушники", 3_000, SourceKind::Ozon, day(1, 10));
-        memory.start("sony наушники", 2_500, SourceKind::Wildberries, day(2, 10));
-        memory.start("sony наушники", 2_800, SourceKind::Ozon, day(3, 10));
+        memory.start(KEY, 3_000, SourceKind::Ozon, day(1, 10));
+        memory.start(KEY, 2_500, SourceKind::Wildberries, day(2, 10));
+        memory.start(KEY, 2_800, SourceKind::Ozon, day(3, 10));
 
         let low = memory.note(
             &SearchRequest::parse("Sony наушники"),
+            Category::Any,
             SourceKind::Dns,
             2_900,
             day(4, 10),
@@ -215,15 +221,10 @@ mod tests {
     #[test]
     fn what_is_older_than_a_month_is_forgotten() {
         let (memory, dir) = memory("old");
-        memory.start(
-            "наушники sony",
-            1_000,
-            SourceKind::Ozon,
-            day(1, 10) - Duration::days(40),
-        );
-        memory.start("sony наушники", 3_000, SourceKind::Ozon, day(1, 10));
+        memory.start(KEY, 1_000, SourceKind::Ozon, day(1, 10) - Duration::days(40));
+        memory.start(KEY, 3_000, SourceKind::Ozon, day(1, 10));
 
-        let low = memory.note(&sony(), SourceKind::Ozon, 2_900, day(2, 10));
+        let low = memory.note(&sony(), Category::Any, SourceKind::Ozon, 2_900, day(2, 10));
 
         assert_eq!(low.map(|low| low.price), Some(3_000));
         std::fs::remove_dir_all(dir).ok();
@@ -243,23 +244,41 @@ mod tests {
     #[test]
     fn request_with_conditions_is_another_question() {
         let (memory, dir) = memory("conditions");
-        memory.start("sony наушники", 1_000, SourceKind::Ozon, day(1, 10));
+        memory.start(KEY, 1_000, SourceKind::Ozon, day(1, 10));
 
         let limited = SearchRequest::parse("наушники sony до 5000");
 
-        assert_eq!(memory.note(&limited, SourceKind::Ozon, 2_000, day(2, 10)), None);
+        assert_eq!(
+            memory.note(&limited, Category::Any, SourceKind::Ozon, 2_000, day(2, 10)),
+            None
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn another_category_is_another_question() {
+        let (memory, dir) = memory("category");
+        memory.start(KEY, 500, SourceKind::Ozon, day(1, 10));
+
+        let low = memory.note(&sony(), Category::Electronics, SourceKind::Ozon, 2_000, day(2, 10));
+
+        assert_eq!(low, None);
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn memory_survives_a_restart() {
         let (memory, dir) = memory("restart");
-        memory.note(&sony(), SourceKind::Ozon, 3_000, day(1, 10));
-        memory.note(&sony(), SourceKind::Ozon, 2_900, day(2, 10));
+        memory.note(&sony(), Category::Any, SourceKind::Ozon, 3_000, day(1, 10));
+        memory.note(&sony(), Category::Any, SourceKind::Ozon, 2_900, day(2, 10));
 
         let reloaded = PriceMemory::new(Storage::new(dir.clone()));
 
-        assert!(reloaded.note(&sony(), SourceKind::Ozon, 2_800, day(3, 10)).is_some());
+        assert!(
+            reloaded
+                .note(&sony(), Category::Any, SourceKind::Ozon, 2_800, day(3, 10))
+                .is_some()
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

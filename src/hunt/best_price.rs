@@ -1386,6 +1386,38 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1 --nocapture"]
+    async fn second_search_of_a_query_hears_about_the_first_on_live_site() {
+        use chrono::Local;
+
+        use crate::hunt::PriceMemory;
+        use crate::storage::Storage;
+
+        let dir = std::env::temp_dir().join(format!("ozon-price-bot-memory-live-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let memory = PriceMemory::new(Storage::new(dir.clone()));
+        let ozon = crate::marketplace::ozon::Ozon::new(crate::browser::test_browser(), 3);
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(ozon))]);
+        let request = request();
+
+        let mut said = Vec::new();
+        for _ in 0..2 {
+            let found = hunt_offers(&search, &request, |_| {})
+                .await
+                .unwrap_or_else(|_| panic!("Ozon молчит"));
+            let best = best_shop_offer(&found).unwrap();
+            let price = best.offer.price;
+            let low = memory.note(&request, Category::Any, best.source, price, Local::now());
+            said.push(low.map(|low| low.says(price)));
+        }
+
+        println!("{said:?}");
+        std::fs::remove_dir_all(dir).ok();
+        assert_eq!(said[0], None);
+        assert!(said[1].is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1 --nocapture"]
     async fn best_ozon_price_without_the_card_on_live_site() {
         let ozon = crate::marketplace::ozon::Ozon::new(crate::browser::test_browser(), 3);
         let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(ozon))]);
