@@ -162,13 +162,13 @@ fn results(ui: &mut egui::Ui, prices: &BestPrices) {
     }
     ui.add_space(6.0);
     match prices.best() {
-        Some(best) => headline(ui, "Лучшая цена в магазине", best),
+        Some(best) => headline(ui, "Лучшая цена в магазине", best, prices.best_without_card),
         None => {
             ui.colored_label(WARN, "Надёжной цены в магазинах не нашлось — уточните запрос.");
         }
     }
     if let Some(ad) = prices.best_ad() {
-        headline(ui, "На Авито — новое или б/у, смотрите объявление", ad);
+        headline(ui, "На Авито — новое или б/у, смотрите объявление", ad, None);
     }
     if !prices.lowest.is_empty() {
         ui.add_space(4.0);
@@ -217,14 +217,22 @@ fn lowest_line(prices: &BestPrices) -> String {
     format!("По площадкам, без доставки: {}", line.join(" · "))
 }
 
-fn headline(ui: &mut egui::Ui, title: &str, found: &PricedOffer) {
+fn price_condition_line(found: &PricedOffer, without_card: Option<u64>) -> Option<String> {
+    let condition = found.source.price_condition()?;
+    Some(match without_card {
+        Some(price) => format!("{condition}, без неё {}", rub(price)),
+        None => condition.to_string(),
+    })
+}
+
+fn headline(ui: &mut egui::Ui, title: &str, found: &PricedOffer, without_card: Option<u64>) {
     egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).strong());
             ui.colored_label(GOOD, RichText::new(rub(found.offer.price)).strong().size(20.0));
             ui.label(found.source.title());
-            if let Some(condition) = found.source.price_condition() {
+            if let Some(condition) = price_condition_line(found, without_card) {
                 ui.weak(condition);
             }
         });
@@ -283,6 +291,7 @@ mod tests {
             market: None,
             lowest: vec![(SourceKind::Wildberries, 3_900), (SourceKind::Ozon, 4_000)],
             failed: Vec::new(),
+            best_without_card: None,
         }
     }
 
@@ -306,6 +315,26 @@ mod tests {
             summary(&prices()),
             "Просмотрено 120, тот же товар — 0, другой отсеян — 30"
         );
+    }
+
+    #[test]
+    fn price_condition_names_the_card_and_the_price_without_it() {
+        let priced = |source| PricedOffer {
+            source,
+            offer: Offer::sample("Наушники Sony WH-CH520", 3_000),
+            used: false,
+            suspicious: false,
+        };
+
+        assert_eq!(
+            price_condition_line(&priced(SourceKind::Ozon), Some(3_200)).unwrap(),
+            "с Ozon Картой, без неё 3\u{a0}200\u{a0}₽"
+        );
+        assert_eq!(
+            price_condition_line(&priced(SourceKind::Ozon), None).unwrap(),
+            "с Ozon Картой"
+        );
+        assert_eq!(price_condition_line(&priced(SourceKind::Dns), None), None);
     }
 
     #[test]

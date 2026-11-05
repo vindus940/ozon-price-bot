@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use futures_util::future::{BoxFuture, join_all};
+use reqwest::Url;
 use tokio::time::timeout;
 
 use crate::marketplace::{OfferSource, Scope, SourceError, SourceKind};
@@ -121,6 +122,23 @@ impl OfferSearch {
             .gather(request, |source| source.search_cheapest(&request.query, from, to))
             .await;
         arranged(request, offers, failed)
+    }
+
+    /// Цена товара без карты магазина: в выдаче её нет, только на странице товара. Не ответила страница — просто без неё.
+    pub async fn price_without_card(&self, source: SourceKind, link: &str) -> Option<u64> {
+        let (_, site) = self.sources.iter().find(|(kind, _)| *kind == source)?;
+        let link = Url::parse(link).ok()?;
+        match timeout(self.patience, site.product(&link)).await {
+            Ok(Ok(product)) => product.price_without_card,
+            Ok(Err(error)) => {
+                log::warn!("цена без карты {link} не прочитана: {error:#}");
+                None
+            }
+            Err(_) => {
+                log::warn!("цена без карты {link} не прочитана: страница не ответила");
+                None
+            }
+        }
     }
 
     async fn gather<'a>(

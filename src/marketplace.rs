@@ -321,24 +321,28 @@ pub mod testing {
     pub struct FakeSource {
         offers: Option<Vec<Offer>>,
         cheapest: Vec<Offer>,
+        without_card: Option<u64>,
         queries: Arc<Mutex<Vec<String>>>,
+        product_links: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeSource {
-        pub fn returning(offers: Vec<Offer>) -> Self {
+        fn with_offers(offers: Option<Vec<Offer>>) -> Self {
             Self {
-                offers: Some(offers),
+                offers,
                 cheapest: Vec::new(),
+                without_card: None,
                 queries: Arc::default(),
+                product_links: Arc::default(),
             }
         }
 
+        pub fn returning(offers: Vec<Offer>) -> Self {
+            Self::with_offers(Some(offers))
+        }
+
         pub fn asking_captcha() -> Self {
-            Self {
-                offers: None,
-                cheapest: Vec::new(),
-                queries: Arc::default(),
-            }
+            Self::with_offers(None)
         }
 
         /// То, что лежит глубже популярной выдачи и находится только от дешёвых.
@@ -346,8 +350,20 @@ pub mod testing {
             Self { cheapest, ..self }
         }
 
+        /// Страница товара отвечает этой ценой без карты; без этого страниц товаров у площадки нет.
+        pub fn with_price_without_card(self, price: u64) -> Self {
+            Self {
+                without_card: Some(price),
+                ..self
+            }
+        }
+
         pub fn queries(&self) -> Arc<Mutex<Vec<String>>> {
             Arc::clone(&self.queries)
+        }
+
+        pub fn product_links(&self) -> Arc<Mutex<Vec<String>>> {
+            Arc::clone(&self.product_links)
         }
     }
 
@@ -373,9 +389,16 @@ pub mod testing {
         }
 
         async fn product(&self, link: &Url) -> Result<Product, SourceError> {
-            self.queries.lock().unwrap().push(link.to_string());
+            self.product_links.lock().unwrap().push(link.to_string());
             self.offers.as_ref().ok_or(SourceError::Captcha)?;
-            Err(anyhow::anyhow!("у подставной площадки нет страниц товаров").into())
+            match self.without_card {
+                Some(price) => Ok(Product {
+                    name: "Товар".into(),
+                    price: Some(price - 1),
+                    price_without_card: Some(price),
+                }),
+                None => Err(anyhow::anyhow!("у подставной площадки нет страниц товаров").into()),
+            }
         }
     }
 }

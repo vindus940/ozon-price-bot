@@ -27,6 +27,9 @@ pub struct BestPrices {
     pub lowest: Vec<(SourceKind, u64)>,
     /// Площадки, которые не ответили, и почему.
     pub failed: Vec<(SourceKind, String)>,
+    /// Сколько лучшая цена стоит без карты магазина, если это другая цена. Только на странице товара, поэтому
+    /// читается один раз и только для лучшего предложения: каждый заход приближает проверку «я не робот».
+    pub best_without_card: Option<u64>,
 }
 
 pub struct PricedOffer {
@@ -101,8 +104,18 @@ pub async fn hunt_best_prices(
             waiting: waiting.to_vec(),
         });
     };
-    let (findings, market) = two_passes(search, request, category, new_only, tell).await?;
-    Ok(priced(category, request, &findings, new_only, market))
+    let (findings, market) = two_passes(search, request, category, new_only, &tell).await?;
+    let mut prices = priced(category, request, &findings, new_only, market);
+    let with_card = prices
+        .best()
+        .filter(|best| best.source.has_card_price())
+        .map(|best| (best.source, best.offer.url.clone(), best.offer.price));
+    if let Some((source, link, price)) = with_card {
+        tell(&findings, market, &[source]);
+        let without_card = search.price_without_card(source, &link).await;
+        prices.best_without_card = without_card.filter(|&without| without > price);
+    }
+    Ok(prices)
 }
 
 /// Поиск для бота: тот же второй проход, но ответ — весь список, а не лучшая цена. Категории бот не спрашивает,
@@ -300,6 +313,7 @@ fn priced(
         market,
         lowest,
         failed,
+        best_without_card: None,
     }
 }
 
@@ -593,7 +607,50 @@ mod tests {
 
         assert_eq!(prices.market.unwrap().median, 4_100);
         assert_eq!(prices.best().unwrap().offer.price, 2_500);
-        assert_eq!(shown.into_inner().unwrap(), [0, 0, 1]);
+        assert_eq!(shown.into_inner().unwrap(), [0, 0, 1, 1]);
+    }
+
+    async fn best_with_card_page(source: SourceKind, fake: FakeSource) -> (Option<u64>, Vec<String>) {
+        let links = fake.product_links();
+        let search = OfferSearch::new(vec![(source, Arc::new(fake))]);
+        let prices = hunted(&search).await;
+        let asked = links.lock().unwrap().clone();
+        (prices.best_without_card, asked)
+    }
+
+    #[tokio::test]
+    async fn best_ozon_price_learns_what_it_costs_without_the_card_from_one_page() {
+        let (without_card, asked) =
+            best_with_card_page(SourceKind::Ozon, popular_and_hidden().with_price_without_card(2_700)).await;
+
+        assert_eq!(without_card, Some(2_700));
+        assert_eq!(asked, ["https://example.com/2500"]);
+    }
+
+    #[tokio::test]
+    async fn same_price_without_the_card_is_not_worth_a_word() {
+        let (without_card, _) =
+            best_with_card_page(SourceKind::Ozon, popular_and_hidden().with_price_without_card(2_500)).await;
+
+        assert_eq!(without_card, None);
+    }
+
+    #[tokio::test]
+    async fn page_that_did_not_answer_leaves_the_answer_as_it_is() {
+        let (without_card, asked) = best_with_card_page(SourceKind::Ozon, popular_and_hidden()).await;
+
+        assert_eq!(without_card, None);
+        assert_eq!(asked.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn source_with_one_price_has_no_page_to_visit() {
+        let fake = popular_and_hidden().with_price_without_card(2_700);
+
+        let (without_card, asked) = best_with_card_page(SourceKind::Dns, fake).await;
+
+        assert_eq!(without_card, None);
+        assert!(asked.is_empty());
     }
 
     #[tokio::test]
@@ -1291,6 +1348,24 @@ mod tests {
         }
         println!("лучшая цена: {:?}", prices.best().map(|found| &found.offer.name));
         assert!(groups.len() < prices.offers.len());
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1 --nocapture"]
+    async fn best_ozon_price_without_the_card_on_live_site() {
+        let ozon = crate::marketplace::ozon::Ozon::new(crate::browser::test_browser(), 3);
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(ozon))]);
+
+        let prices = hunt_best_prices(&search, &request(), Category::Electronics, false, &|_| {})
+            .await
+            .unwrap_or_else(|_| panic!("Ozon молчит"));
+
+        let best = prices.best().unwrap();
+        println!(
+            "{} ₽ с картой, без неё {:?}: {} {}",
+            best.offer.price, prices.best_without_card, best.offer.name, best.offer.url
+        );
+        assert!(prices.best_without_card.is_some_and(|price| price > best.offer.price));
     }
 
     #[tokio::test]

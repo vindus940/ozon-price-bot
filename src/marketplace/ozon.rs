@@ -231,6 +231,11 @@ mod tests {
     const PRODUCT_SAMPLE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ozon-product.json");
 
     fn parse_product(page: &serde_json::Value) -> Option<Product> {
+        parse_product_text(&page.to_string())
+    }
+
+    /// Текстом — когда важен порядок виджетов: `serde_json` расставляет ключи по алфавиту.
+    fn parse_product_text(page: &str) -> Option<Product> {
         let script = format!(
             "const parse = {PARSE_SCRIPT};
              JSON.stringify(parse.productOf(Object.entries(({page}).widgetStates)))"
@@ -259,6 +264,25 @@ mod tests {
                 name: "Sony WH-CH520 Наушники накладные беспроводные, черные".into(),
                 price: Some(3_870),
                 price_without_card: Some(3_990),
+            })
+        );
+    }
+
+    /// Вживую 5.11.2026: у товара, недавно подешевевшего, рядом с ценой есть виджет с похожим именем и без цен.
+    #[test]
+    fn price_widget_is_not_confused_with_the_one_about_a_price_drop() {
+        let page = r#"{ "widgetStates": {
+            "webPriceDecreasedCompact-3156513-default-1": "{\"link\":\"/modal/web_pdp_lower_price\"}",
+            "webProductHeading-1-default-1": "{\"title\":\"Наушники\"}",
+            "webPrice-3121879-default-1": "{\"isAvailable\":true,\"cardPrice\":\"2 199 ₽\",\"price\":\"2 315 ₽\"}"
+        }}"#;
+
+        assert_eq!(
+            parse_product_text(page),
+            Some(Product {
+                name: "Наушники".into(),
+                price: Some(2_199),
+                price_without_card: Some(2_315),
             })
         );
     }

@@ -108,7 +108,7 @@
   // показывает плитка выдачи), price — без карты. Нет cardPrice — цена одна для всех. Нет в продаже — isAvailable: false.
   const productOf = widgets => {
     const stateOf = prefix => widgets
-      .filter(([name]) => name.startsWith(prefix))
+      .filter(([name]) => name.startsWith(prefix + '-'))
       .map(([, state]) => parseJson(state))
       .find(Boolean);
     const heading = stateOf('webProductHeading');
