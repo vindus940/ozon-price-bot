@@ -122,6 +122,16 @@ impl SourceKind {
         self == SourceKind::Avito
     }
 
+    /// На каком условии площадка показывает цену в выдаче: цены без него там нет, а сравнивать надо честно (`SITES.md`).
+    pub fn price_condition(self) -> Option<&'static str> {
+        match self {
+            SourceKind::Ozon => Some("с Ozon Картой"),
+            SourceKind::Wildberries => Some("с WB Кошельком"),
+            SourceKind::YandexMarket => Some("с Яндекс Пэй"),
+            SourceKind::Avito | SourceKind::Dns => None,
+        }
+    }
+
     /// Что важно знать о площадке, выбирая её для слежки.
     pub fn note(self) -> Option<&'static str> {
         match self {

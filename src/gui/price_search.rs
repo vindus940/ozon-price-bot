@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD, WARN};
-use crate::format::{rub, tile_marks};
+use crate::format::{rub, source_price, tile_marks};
 use crate::hunt::{BestPrices, Category, PriceProgress, PricedOffer, failure_reason, hunt_best_prices};
 use crate::marketplace::SourceKind;
 use crate::search::{OfferSearch, SearchRequest};
@@ -198,9 +198,9 @@ fn lowest_line(prices: &BestPrices) -> String {
     let line: Vec<String> = prices
         .lowest
         .iter()
-        .map(|&(source, price)| format!("{} {}", source.title(), rub(price)))
+        .map(|&(source, price)| source_price(source, price))
         .collect();
-    format!("По площадкам: {}", line.join(" · "))
+    format!("По площадкам, без доставки: {}", line.join(" · "))
 }
 
 fn headline(ui: &mut egui::Ui, title: &str, found: &PricedOffer) {
@@ -210,6 +210,9 @@ fn headline(ui: &mut egui::Ui, title: &str, found: &PricedOffer) {
             ui.label(RichText::new(title).strong());
             ui.colored_label(GOOD, RichText::new(rub(found.offer.price)).strong().size(20.0));
             ui.label(found.source.title());
+            if let Some(condition) = found.source.price_condition() {
+                ui.weak(condition);
+            }
         });
         ui.hyperlink_to(&found.offer.name, &found.offer.url);
         details(ui, found);
@@ -295,7 +298,8 @@ mod tests {
     fn lowest_line_names_each_source() {
         assert_eq!(
             lowest_line(&prices()),
-            "По площадкам: Wildberries 3\u{a0}900\u{a0}₽ · Ozon 4\u{a0}000\u{a0}₽"
+            "По площадкам, без доставки: Wildberries 3\u{a0}900\u{a0}₽ с WB Кошельком · \
+             Ozon 4\u{a0}000\u{a0}₽ с Ozon Картой"
         );
     }
 

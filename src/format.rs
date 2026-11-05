@@ -1,4 +1,13 @@
+use crate::marketplace::SourceKind;
 use crate::offer::Offer;
+
+/// Цена площадки в сравнении с другими: «Ozon 4 000 ₽ с Ozon Картой», «ДНС 4 400 ₽».
+pub fn source_price(source: SourceKind, price: u64) -> String {
+    match source.price_condition() {
+        Some(condition) => format!("{} {} {condition}", source.title(), rub(price)),
+        None => format!("{} {}", source.title(), rub(price)),
+    }
+}
 
 /// Сумма в рублях с разбивкой на тысячи: 72500 → «72 500 ₽» (с неразрывными пробелами).
 pub fn rub(amount: u64) -> String {

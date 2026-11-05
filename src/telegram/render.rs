@@ -2,7 +2,7 @@ use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup};
 
 use super::WatchAction;
 use super::buttons::{Press, deal_key};
-use crate::format::{price_drop, rub, signed_rub, tile_marks};
+use crate::format::{price_drop, rub, signed_rub, source_price, tile_marks};
 use crate::health::{Health, Problem};
 use crate::hunt::{Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SourceReport, Watch};
 use crate::marketplace::{Product, SiteStatus, SourceError, SourceKind};
@@ -401,9 +401,9 @@ fn lowest_by_source(findings: &Findings) -> String {
     lowest.sort_by_key(|&(price, _)| price);
     let line: Vec<String> = lowest
         .iter()
-        .map(|&(price, source)| format!("{} {}", source.title(), rub(price)))
+        .map(|&(price, source)| source_price(source, price))
         .collect();
-    format!("\nСамые низкие цены: {}", line.join(" · "))
+    format!("\nСамые низкие цены без доставки: {}", line.join(" · "))
 }
 
 /// Площадки, которых нет в ответе: без оговорки список выглядел бы полным.
@@ -917,12 +917,16 @@ mod tests {
             Offer::sample("Наушники", 2_000),
             Offer::sample("Наушники", 2_500),
         ]);
+        found.suitable[0].source = SourceKind::Dns;
         found.suitable[2].source = SourceKind::Wildberries;
 
         let text = rendered(&SearchRequest::parse("наушники"), &found, 10);
 
         assert!(
-            text.contains("\nСамые низкие цены: Ozon 2\u{a0}000\u{a0}₽ · Wildberries 2\u{a0}500\u{a0}₽\nПодходят"),
+            text.contains(
+                "\nСамые низкие цены без доставки: Ozon 2\u{a0}000\u{a0}₽ с Ozon Картой · \
+                 Wildberries 2\u{a0}500\u{a0}₽ с WB Кошельком · ДНС 3\u{a0}000\u{a0}₽\nПодходят"
+            ),
             "{text}"
         );
         let per_kilogram = rendered(&SearchRequest::parse("наушники за кг"), &found, 10);
