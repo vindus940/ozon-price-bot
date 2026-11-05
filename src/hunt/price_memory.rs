@@ -21,11 +21,14 @@ const POINT_EVERY_MINUTES: i64 = 60;
 /// В пределах этого от минимума цена уже хороша: ждать ещё нескольких процентов обычно незачем.
 const NEAR_THE_LOW_PERCENT: u64 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PricePoint {
     at: DateTime<Local>,
     price: u64,
     source: SourceKind,
+    /// Запрос, как его написали: в ключе слова отсортированы, а `wh-ch520` разбито и как запрос уже не годится.
+    #[serde(default)]
+    asked: String,
 }
 
 /// Лучшая цена прошлых поисков того же запроса.
@@ -74,7 +77,8 @@ struct Points(HashMap<String, Vec<PricePoint>>);
 
 impl Points {
     /// Сначала — что было раньше, потом запись новой цены: новая цена с собой не сравнивается.
-    fn note(&mut self, key: String, price: u64, source: SourceKind, now: DateTime<Local>) -> Option<PastLow> {
+    fn note(&mut self, key: String, point: PricePoint) -> Option<PastLow> {
+        let now = point.at;
         let points = self.0.entry(key).or_default();
         points.retain(|point| now - point.at < Duration::days(KEPT_DAYS));
         let low = points.iter().min_by_key(|point| point.price).map(|low| PastLow {
@@ -83,15 +87,14 @@ impl Points {
             at: low.at,
             since: points[0].at,
         });
-        Self::add(points, price, source, now);
+        Self::add(points, point);
         low
     }
 
-    fn add(points: &mut Vec<PricePoint>, price: u64, source: SourceKind, now: DateTime<Local>) {
-        let point = PricePoint { at: now, price, source };
+    fn add(points: &mut Vec<PricePoint>, point: PricePoint) {
         match points.last_mut() {
-            Some(last) if now - last.at < Duration::minutes(POINT_EVERY_MINUTES) => {
-                if price < last.price {
+            Some(last) if point.at - last.at < Duration::minutes(POINT_EVERY_MINUTES) => {
+                if point.price < last.price {
                     *last = PricePoint { at: last.at, ..point };
                 }
             }
@@ -126,7 +129,13 @@ impl PriceMemory {
     ) -> Option<PastLow> {
         let key = key_of(request, category)?;
         let mut points = self.points.lock().unwrap();
-        let low = points.note(key, price, source, now);
+        let point = PricePoint {
+            at: now,
+            price,
+            source,
+            asked: request.query.clone(),
+        };
+        let low = points.note(key, point);
         if let Err(error) = self.storage.save(FILE, &*points) {
             log::warn!("лучшая цена не записана: {error:#}");
         }
@@ -139,13 +148,10 @@ impl PriceMemory {
         let mut queries: Vec<SearchedQuery> = points
             .0
             .iter()
-            .filter_map(|(key, points)| {
+            .filter_map(|(_, points)| {
                 let last = points.last()?;
                 Some(SearchedQuery {
-                    query: key
-                        .split_once(": ")
-                        .map_or(key.as_str(), |(_, query)| query)
-                        .to_string(),
+                    query: last.asked.clone(),
                     source: last.source,
                     price: last.price,
                     lowest: points.iter().map(|point| point.price).min()?,
@@ -163,11 +169,12 @@ impl PriceMemory {
     #[cfg(test)]
     fn start(&self, key: &str, price: u64, source: SourceKind, at: DateTime<Local>) {
         let mut points = self.points.lock().unwrap();
-        points
-            .0
-            .entry(key.to_string())
-            .or_default()
-            .push(PricePoint { at, price, source });
+        points.0.entry(key.to_string()).or_default().push(PricePoint {
+            at,
+            price,
+            source,
+            asked: key.split_once(": ").map_or(key, |(_, asked)| asked).to_string(),
+        });
     }
 }
 
@@ -195,6 +202,15 @@ mod tests {
         (PriceMemory::new(Storage::new(dir.clone())), dir)
     }
 
+    fn point(price: u64, source: SourceKind, at: DateTime<Local>) -> PricePoint {
+        PricePoint {
+            at,
+            price,
+            source,
+            asked: "запрос".into(),
+        }
+    }
+
     fn day(day: u32, hour: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 11, day, hour, 0, 0).unwrap()
     }
@@ -209,7 +225,7 @@ mod tests {
     fn first_search_has_no_past_and_the_next_one_sees_the_lowest() {
         let (memory, dir) = memory("lowest");
         let mut first = Points::default();
-        assert_eq!(first.note("a".into(), 100, SourceKind::Ozon, day(1, 10)), None);
+        assert_eq!(first.note("a".into(), point(100, SourceKind::Ozon, day(1, 10))), None);
 
         memory.start(KEY, 3_000, SourceKind::Ozon, day(1, 10));
         memory.start(KEY, 2_500, SourceKind::Wildberries, day(2, 10));
@@ -271,9 +287,15 @@ mod tests {
     #[test]
     fn searches_within_an_hour_make_one_point_with_the_lower_price() {
         let mut points = Vec::new();
-        Points::add(&mut points, 3_000, SourceKind::Ozon, day(1, 10));
-        Points::add(&mut points, 2_500, SourceKind::Dns, day(1, 10) + Duration::minutes(20));
-        Points::add(&mut points, 2_700, SourceKind::Ozon, day(1, 10) + Duration::minutes(40));
+        Points::add(&mut points, point(3_000, SourceKind::Ozon, day(1, 10)));
+        Points::add(
+            &mut points,
+            point(2_500, SourceKind::Dns, day(1, 10) + Duration::minutes(20)),
+        );
+        Points::add(
+            &mut points,
+            point(2_700, SourceKind::Ozon, day(1, 10) + Duration::minutes(40)),
+        );
 
         assert_eq!(points.len(), 1);
         assert_eq!((points[0].price, points[0].source), (2_500, SourceKind::Dns));
@@ -290,6 +312,17 @@ mod tests {
             memory.note(&limited, Category::Any, SourceKind::Ozon, 2_000, day(2, 10)),
             None
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn history_keeps_the_query_as_it_was_written() {
+        let (memory, dir) = memory("written");
+        let request = SearchRequest::parse("наушники sony wh-ch520");
+
+        memory.note(&request, Category::Any, SourceKind::Ozon, 3_000, day(1, 10));
+
+        assert_eq!(memory.recent(10)[0].query, "наушники sony wh-ch520");
         std::fs::remove_dir_all(dir).ok();
     }
 

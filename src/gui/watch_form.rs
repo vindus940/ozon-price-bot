@@ -260,6 +260,14 @@ impl WatchForm {
         Watch::can_search_several(self.goal == GoalKind::BelowMarket, self.source, &self.link)
     }
 
+    fn strictest_shop(&self) -> SourceKind {
+        let others = self.also_sources.iter().copied().filter(|_| self.can_search_several());
+        others
+            .chain([self.source])
+            .max_by_key(|shop| shop.min_interval_minutes())
+            .unwrap_or(self.source)
+    }
+
     fn other_shops(&mut self, ui: &mut egui::Ui) {
         if !self.can_search_several() {
             return;
@@ -410,10 +418,11 @@ impl WatchForm {
                     .range(1..=1440)
                     .suffix(" мин"),
             );
+            let strictest = self.strictest_shop();
             ui.weak(format!(
                 "{} — не чаще раза в {} мин",
-                self.source.title(),
-                self.source.min_interval_minutes()
+                strictest.title(),
+                strictest.min_interval_minutes()
             ));
         });
         ui.end_row();
@@ -681,6 +690,22 @@ mod tests {
 
         form.source = SourceKind::Avito;
         assert_eq!(form.to_watch().unwrap().shop, ShopConditions::default());
+    }
+
+    #[test]
+    fn interval_hint_names_the_strictest_shop_of_the_watch() {
+        let mut form = WatchForm::edit(&Watch {
+            also_sources: vec![SourceKind::Wildberries, SourceKind::YandexMarket],
+            ..Watch::new_draft()
+        });
+        assert_eq!(form.strictest_shop(), SourceKind::YandexMarket);
+
+        form.link = "https://www.ozon.ru/search/?text=sony".into();
+        assert_eq!(
+            form.strictest_shop(),
+            SourceKind::Ozon,
+            "у ссылки другие магазины не спрашиваются"
+        );
     }
 
     #[test]
