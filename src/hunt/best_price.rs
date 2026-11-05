@@ -131,10 +131,8 @@ pub async fn hunt_offers(
     report: impl Fn(OffersProgress) + Send + Sync,
 ) -> Result<Findings, (SourceKind, SourceError)> {
     if !request.wants_lowest_price() {
-        let mut findings = search.find_for_market(request).await?;
-        mark_suspicious(&mut findings, request, None);
-        findings.refine(request);
-        return Ok(findings);
+        let findings = search.find_for_market(request).await?;
+        return Ok(answer_of_bot(findings, request, None));
     }
     let wanted = OfferFilter::new(request);
     let tell = |findings: &Findings, market: Option<Market>, waiting: &[SourceKind]| {
@@ -148,10 +146,19 @@ pub async fn hunt_offers(
             deeper: market.is_some(),
         });
     };
-    let (mut findings, market) = two_passes(search, request, Category::Any, false, tell).await?;
+    let (findings, market) = two_passes(search, request, Category::Any, false, tell).await?;
+    Ok(answer_of_bot(findings, request, market))
+}
+
+/// Вещи «для» искомого и брак уходят из ответа: это другой товар, и он не должен стоять первым как самая низкая цена.
+/// Сначала судим цены: для этого нужны и те предложения, что в ответ не попадут.
+fn answer_of_bot(mut findings: Findings, request: &SearchRequest, market: Option<Market>) -> Findings {
     mark_suspicious(&mut findings, request, market);
+    findings
+        .suitable
+        .retain(|found| Category::Any.accepts(&request.query, &found.offer));
     findings.refine(request);
-    Ok(findings)
+    findings
 }
 
 /// До отбора по условиям запроса: при «до 5000» настоящие цены дорогой модели в ответ не попадут, а судить копии нужны.
@@ -874,6 +881,107 @@ mod tests {
             suspicious_in_answer("наушники sony до 5000").await,
             [(2_500, true), (4_000, false)]
         );
+    }
+
+    async fn names_in_answer(text: &str, offers: &[(&str, u64)]) -> Vec<String> {
+        let offers = offers
+            .iter()
+            .map(|&(name, price)| Offer {
+                url: format!("https://example.com/{price}"),
+                ..Offer::sample(name, price)
+            })
+            .collect();
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(FakeSource::returning(offers)))]);
+        let findings = hunt_offers(&search, &SearchRequest::parse(text), |_| {})
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+        findings.suitable.into_iter().map(|found| found.offer.name).collect()
+    }
+
+    #[tokio::test]
+    async fn things_for_the_product_and_defects_leave_the_answer_of_the_bot() {
+        let answer = names_in_answer(
+            "наушники sony wh-ch520",
+            &[
+                ("Амбушюры для наушников Sony WH-CH520", 500),
+                ("Защитная сумка для наушников Sony WH-CH520", 2_100),
+                ("Наушники Sony WH-CH520 на запчасти", 2_200),
+                ("Наушники Sony WH-CH520", 4_000),
+            ],
+        )
+        .await;
+
+        assert_eq!(answer, ["Наушники Sony WH-CH520"]);
+    }
+
+    #[tokio::test]
+    async fn the_same_goes_for_an_answer_by_discount() {
+        let answer = names_in_answer(
+            "наушники sony по скидке",
+            &[("Чехол для наушников Sony", 500), ("Наушники Sony", 4_000)],
+        )
+        .await;
+
+        assert_eq!(answer, ["Наушники Sony"]);
+    }
+
+    #[tokio::test]
+    async fn asked_for_a_case_gets_the_case_and_goods_for_someone_stay() {
+        let cases = names_in_answer("чехол iphone", &[("Чехол для iPhone 15", 500)]).await;
+        let food = names_in_answer("корм для кошек", &[("Сухой корм для кошек Royal Canin", 2_000)]).await;
+
+        assert_eq!(cases, ["Чехол для iPhone 15"]);
+        assert_eq!(food, ["Сухой корм для кошек Royal Canin"]);
+    }
+
+    #[tokio::test]
+    async fn accessories_still_count_as_seen_but_not_as_the_market() {
+        let source = FakeSource::returning(vec![
+            Offer {
+                url: "https://example.com/case".into(),
+                ..Offer::sample("Чехол для наушников Sony", 300)
+            },
+            Offer {
+                url: "https://example.com/sony".into(),
+                ..Offer::sample("Наушники Sony", 4_000)
+            },
+        ]);
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(source))]);
+
+        let findings = hunt_offers(&search, &SearchRequest::parse("наушники sony"), |_| {})
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+
+        assert_eq!((findings.scanned, findings.suitable.len()), (2, 1));
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живые Ozon и Wildberries: cargo test -- --ignored --test-threads=1 --nocapture"]
+    async fn goods_for_someone_survive_on_live_sites() {
+        use crate::marketplace::ozon::Ozon;
+        use crate::marketplace::wildberries::Wildberries;
+
+        let browser = crate::browser::test_browser();
+        let search = OfferSearch::new(vec![
+            (SourceKind::Ozon, Arc::new(Ozon::new(Arc::clone(&browser), 3))),
+            (SourceKind::Wildberries, Arc::new(Wildberries::new(browser))),
+        ]);
+        let request = SearchRequest::parse("корм для кошек royal canin");
+
+        let all = search
+            .find(&request)
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+        let names: Vec<String> = all.suitable.iter().map(|found| found.offer.name.clone()).collect();
+        let dropped: Vec<&String> = all
+            .suitable
+            .iter()
+            .filter(|found| !Category::Any.accepts(&request.query, &found.offer))
+            .map(|found| &found.offer.name)
+            .collect();
+
+        println!("подошло {}, ушло бы {}: {dropped:#?}", names.len(), dropped.len());
+        assert!(dropped.len() * 2 < names.len());
     }
 
     #[tokio::test]
