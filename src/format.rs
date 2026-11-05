@@ -9,6 +9,14 @@ pub fn source_price(source: SourceKind, price: u64) -> String {
     }
 }
 
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 /// Что свёрнуто под предложением: «Та же модель: ещё 3, до 3 500 ₽ · Ozon, Wildberries».
 pub fn same_model(others: impl IntoIterator<Item = (SourceKind, u64)>) -> String {
     let mut sources: Vec<&str> = Vec::new();

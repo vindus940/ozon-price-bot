@@ -284,6 +284,7 @@ impl WatchForm {
                 ui.checkbox(&mut self.shop.by_tomorrow, "Привезут не позже завтра");
                 if self.source.has_marketplace_seller() {
                     ui.checkbox(&mut self.shop.only_ozon, "Только Ozon");
+                    ui.checkbox(&mut self.shop.verified_brand, "Бренд проверен");
                 }
                 ui.weak("рынок всё равно считается по всем предложениям");
             });
@@ -343,10 +344,10 @@ impl WatchForm {
     fn product(&mut self, ui: &mut egui::Ui) {
         ui.label("Ссылка на товар");
         ui.vertical(|ui| {
-            field(ui, &mut self.link, &format!("https://{}/product/…", self.source.site()));
+            field(ui, &mut self.link, &self.source.product_link_sample());
             ui.weak("Откройте страницу товара на сайте и скопируйте адрес из строки браузера.");
             if !self.source.has_product_pages() {
-                ui.colored_label(WARN, "За ценой товара программа следит на Ozon и в ДНС");
+                ui.colored_label(WARN, "За ценой товара программа следит на Ozon, Wildberries и в ДНС");
             }
         });
         ui.end_row();
@@ -357,12 +358,10 @@ impl WatchForm {
                 ui.label("не дороже");
                 short_field(ui, &mut self.target.price);
             });
-            if self.source.has_card_price() {
-                ui.checkbox(
-                    &mut self.target.without_card,
-                    "У меня нет Ozon Карты — сравнивать с ценой без неё",
-                );
-                ui.weak("Ozon показывает первой цену с Ozon Картой; в сообщении будут обе.");
+            if let (Some(with), Some(without)) = (self.source.price_condition(), self.source.without_price_condition())
+            {
+                ui.checkbox(&mut self.target.without_card, format!("Сравнивать с ценой {without}"));
+                ui.weak(format!("Сайт показывает первой цену {with}; в сообщении будут обе."));
             }
         });
         ui.end_row();
@@ -501,6 +500,7 @@ impl WatchForm {
             shop: ShopConditions {
                 by_tomorrow: self.shop.by_tomorrow && self.source.has_delivery(),
                 only_ozon: self.shop.only_ozon && self.source.has_marketplace_seller(),
+                verified_brand: self.shop.verified_brand && self.source.has_marketplace_seller(),
             },
             new_only: self.new_only && self.source.has_used_goods(),
             sellers: if self.source.has_private_sellers() {
@@ -620,6 +620,7 @@ mod tests {
             shop: ShopConditions {
                 by_tomorrow: true,
                 only_ozon: true,
+                verified_brand: true,
             },
             ..Watch::new_draft()
         };
@@ -632,6 +633,7 @@ mod tests {
             ShopConditions {
                 by_tomorrow: true,
                 only_ozon: false,
+                verified_brand: false,
             },
             "у ДНС есть срок доставки, но нет сторонних продавцов"
         );

@@ -12,7 +12,10 @@ use crate::offer::Offer;
 
 const HOME: &str = "https://www.wildberries.ru/";
 const READ_SCRIPT: &str = include_str!("wildberries/read.js");
+const PRODUCT_SCRIPT: &str = include_str!("wildberries/product.js");
 const NOT_FOUND: &str = "Wildberries не открыл выдачу — проверьте запрос или ссылку";
+const PRODUCT_NOT_FOUND: &str =
+    "Wildberries не нашёл такой товар — откройте ссылку в браузере: может быть, его сняли с продажи";
 /// Wildberries. Выдачу страница получает из внутреннего API, но тот же запрос из скрипта вкладки WB отклоняет (403,
 /// 29.10.2026) — поэтому, как у ДНС, вкладка открывает поиск и читает готовые карточки. Читается первый экран,
 /// 40 товаров: `page=2` WB не замечает, а следующие товары подгружает прокруткой только в видимом окне (5.11.2026),
@@ -77,9 +80,11 @@ impl OfferSource for Wildberries {
             .into_offers()
     }
 
-    /// Страницу товара WB ещё не разведали — форма такую слежку не даст создать (`SourceKind::has_product_pages`).
-    async fn product(&self, _link: &Url) -> Result<Product, SourceError> {
-        Err(anyhow!("Wildberries: за ценой одного товара программа пока не следит — только Ozon и ДНС").into())
+    async fn product(&self, link: &Url) -> Result<Product, SourceError> {
+        let _exclusive = self.tab_in_use.lock().await;
+        let tab = self.browser.tab(HOME).await?;
+        let page: ProductPage = page::open(&tab, link.as_str(), PRODUCT_SCRIPT, PRODUCT_NOT_FOUND).await?;
+        Ok(page.into_product())
     }
 
     async fn search_cheapest(&self, query: &str, from: u64, to: u64) -> Result<Vec<Offer>, SourceError> {
@@ -107,6 +112,36 @@ impl ScriptPage for Page {
 
     fn state(&self) -> &PageState {
         &self.state
+    }
+}
+
+/// Страница одного товара, прочитанная `wildberries/product.js`.
+#[derive(Deserialize)]
+struct ProductPage {
+    stale: bool,
+    state: PageState,
+    name: String,
+    price: Option<String>,
+    price_without_wallet: Option<String>,
+}
+
+impl ScriptPage for ProductPage {
+    fn stale(&self) -> bool {
+        self.stale
+    }
+
+    fn state(&self) -> &PageState {
+        &self.state
+    }
+}
+
+impl ProductPage {
+    fn into_product(self) -> Product {
+        Product {
+            name: self.name,
+            price: self.price.as_deref().and_then(rubles),
+            price_without_card: self.price_without_wallet.as_deref().and_then(rubles),
+        }
     }
 }
 
@@ -277,6 +312,47 @@ mod live {
             offers[0].price,
             offers[0].name
         );
+    }
+
+    fn product_page(price: Option<&str>, without_wallet: Option<&str>) -> ProductPage {
+        ProductPage {
+            stale: false,
+            state: PageState::Listings,
+            name: "Беспроводные наушники WH-CH520 SONY".into(),
+            price: price.map(String::from),
+            price_without_wallet: without_wallet.map(String::from),
+        }
+    }
+
+    #[test]
+    fn product_page_gives_both_prices_or_says_there_is_none() {
+        let product = product_page(Some("4 165 ₽"), Some("4 294 ₽")).into_product();
+        assert_eq!((product.price, product.price_without_card), (Some(4_165), Some(4_294)));
+
+        let single = product_page(Some("4 294 ₽"), None).into_product();
+        assert_eq!((single.price, single.price_without_card), (Some(4_294), None));
+
+        assert_eq!(product_page(None, None).into_product().price, None);
+    }
+
+    /// Вживую 5.11.2026 страница товара готова и в скрытой вкладке, в отличие от карточек ДНС.
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живой Wildberries: cargo test -- --ignored --test-threads=1 --nocapture"]
+    async fn reads_product_page_on_live_site() {
+        let wildberries = Wildberries::new(test_browser());
+        let offers = wildberries
+            .search("наушники sony wh-ch520", Scope::default())
+            .await
+            .unwrap();
+        let link = crate::marketplace::SourceKind::Wildberries
+            .parse_product_link(&offers[0].url)
+            .unwrap();
+
+        let product = wildberries.product(&link).await.unwrap();
+
+        println!("{link}: {product:?}, в выдаче {}", offers[0].price);
+        assert!(!product.name.is_empty());
+        assert!(product.price.is_some_and(|price| price > 0));
     }
 
     #[tokio::test]

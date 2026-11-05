@@ -42,11 +42,21 @@ pub struct ShopConditions {
     pub by_tomorrow: bool,
     /// «только Ozon»: продаёт сам маркетплейс, а не сторонний продавец.
     pub only_ozon: bool,
+    /// «бренд проверен»: Ozon проверил, что продавец вправе торговать брендом. Отметка есть только на Ozon.
+    #[serde(default)]
+    pub verified_brand: bool,
 }
 
 impl ShopConditions {
     pub fn accepts(self, offer: &Offer) -> bool {
-        (!self.by_tomorrow || offer.arrives_by_tomorrow()) && (!self.only_ozon || offer.sold_by_ozon)
+        (!self.by_tomorrow || offer.arrives_by_tomorrow())
+            && (!self.only_ozon || offer.sold_by_ozon)
+            && (!self.verified_brand || offer.brand_verified)
+    }
+
+    /// Это условие умеет проверить только маркетплейс: другие площадки заведомо ничего не пройдут.
+    pub fn needs_marketplace(self) -> bool {
+        self.only_ozon || self.verified_brand
     }
 
     /// Как условия звучат в заголовке ответа и в строке слежки.
@@ -54,6 +64,7 @@ impl ShopConditions {
         [
             self.by_tomorrow.then_some("доставка до завтра"),
             self.only_ozon.then_some("только Ozon"),
+            self.verified_brand.then_some("бренд проверен"),
         ]
         .into_iter()
         .flatten()
@@ -67,6 +78,9 @@ static BY_TOMORROW: LazyLock<Regex> =
 
 static ONLY_OZON: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)(только\s+(?:ozon|озон\w*))(?:\s|$)").unwrap());
+
+static VERIFIED_BRAND: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)(бренд\s+проверен\w*|проверенн\w+\s+бренд\w*)(?:\s|$)").unwrap());
 
 static PER_UNIT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)за\s+(?:1\s*)?(кг|килограмм\w*|л|литр\w*|шт|штук\w*)\b").unwrap());
@@ -94,6 +108,7 @@ impl SearchRequest {
         let (order, text) = cut(&ORDER, &text, |words| Some(order(words)));
         let (by_tomorrow, text) = cut(&BY_TOMORROW, &text, |_| Some(()));
         let (only_ozon, text) = cut(&ONLY_OZON, &text, |_| Some(()));
+        let (verified_brand, text) = cut(&VERIFIED_BRAND, &text, |_| Some(()));
         let (price, text) = cut_price(&text);
 
         let (excluded, included): (Vec<&str>, Vec<&str>) = text
@@ -111,6 +126,7 @@ impl SearchRequest {
             shop: ShopConditions {
                 by_tomorrow: by_tomorrow.is_some(),
                 only_ozon: only_ozon.is_some(),
+                verified_brand: verified_brand.is_some(),
             },
         }
     }
@@ -288,10 +304,18 @@ mod tests {
                 shop: ShopConditions {
                     by_tomorrow: true,
                     only_ozon: true,
+                    verified_brand: false,
                 },
                 ..request("наушники sony", &[], None, Some(5000))
             }
         );
+        for text in ["наушники sony бренд проверен", "наушники sony проверенный бренд"]
+        {
+            let request = SearchRequest::parse(text);
+            assert!(request.shop.verified_brand, "{text}");
+            assert_eq!(request.query, "наушники sony", "{text}");
+        }
+        assert!(!SearchRequest::parse("бренд одежды").shop.verified_brand);
         for text in [
             "чайник с доставкой сегодня",
             "чайник доставка до завтра",

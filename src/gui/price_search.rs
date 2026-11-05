@@ -220,7 +220,10 @@ fn lowest_line(prices: &BestPrices) -> String {
 fn price_condition_line(found: &PricedOffer, without_card: Option<u64>) -> Option<String> {
     let condition = found.source.price_condition()?;
     Some(match without_card {
-        Some(price) => format!("{condition}, без неё {}", rub(price)),
+        Some(price) => {
+            let without = found.source.without_price_condition().unwrap_or("без условия");
+            format!("{condition}, {without} {}", rub(price))
+        }
         None => condition.to_string(),
     })
 }
@@ -328,7 +331,11 @@ mod tests {
 
         assert_eq!(
             price_condition_line(&priced(SourceKind::Ozon), Some(3_200)).unwrap(),
-            "с Ozon Картой, без неё 3\u{a0}200\u{a0}₽"
+            "с Ozon Картой, без Ozon Карты 3\u{a0}200\u{a0}₽"
+        );
+        assert_eq!(
+            price_condition_line(&priced(SourceKind::Wildberries), Some(3_200)).unwrap(),
+            "с WB Кошельком, без WB Кошелька 3\u{a0}200\u{a0}₽"
         );
         assert_eq!(
             price_condition_line(&priced(SourceKind::Ozon), None).unwrap(),

@@ -2,7 +2,7 @@ use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup};
 
 use super::WatchAction;
 use super::buttons::{Press, deal_key};
-use crate::format::{price_drop, rub, same_model, signed_rub, source_price, tile_marks};
+use crate::format::{capitalized, price_drop, rub, same_model, signed_rub, source_price, tile_marks};
 use crate::health::{Health, Problem};
 use crate::hunt::{
     Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SourceReport, Watch, same_model_groups,
@@ -39,6 +39,9 @@ pub(super) const HELP: &str = "Напишите, что ищете, — приш
 
 Только то, что привезут не позже завтра, и только от самого Ozon:
 <code>наушники sony доставка завтра только ozon</code>
+
+Только с отметкой Ozon, что продавец вправе торговать брендом:
+<code>наушники sony бренд проверен</code>
 
 Продукты и химию честнее сравнивать по цене за килограмм, литр или штуку — пачка 400 г не будет «дешевле» мешка на 3 кг:
 <code>стиральный порошок за кг</code>
@@ -709,14 +712,16 @@ fn target_price(watch: &Watch) -> String {
     watch.target_price().map(rub).unwrap_or_default()
 }
 
-/// Под сообщением о товаре — вторая цена Ozon, если она другая (с картой или без), и ссылка на товар.
+/// Под сообщением о товаре — вторая цена, если она другая (с картой или кошельком и без них), и ссылка на товар.
 fn product_lines(watch: &Watch, product: &Product) -> String {
+    let with = watch.source.price_condition().unwrap_or_default();
+    let without = watch.source.without_price_condition().unwrap_or_default();
     let other = match (product.price, product.price_without_card, watch.goal) {
         (Some(with_card), Some(without_card), _) if with_card == without_card => String::new(),
         (Some(with_card), Some(_), Goal::TargetPrice { without_card: true, .. }) => {
-            format!("\nС Ozon Картой — {}", rub(with_card))
+            format!("\n{} — {}", capitalized(with), rub(with_card))
         }
-        (Some(_), Some(without_card), _) => format!("\nБез Ozon Карты — {}", rub(without_card)),
+        (Some(_), Some(without_card), _) => format!("\n{} — {}", capitalized(without), rub(without_card)),
         _ => String::new(),
     };
     let link = watch.link.as_deref().unwrap_or_default();
@@ -735,11 +740,14 @@ fn goal_summary(watch: &Watch) -> String {
     let goal = match watch.goal {
         Goal::BelowMarket { min_discount_percent } => format!("ниже рынка от {min_discount_percent}%"),
         Goal::Resale { min_profit, .. } => format!("перепродажа: выгода от {}", rub(min_profit)),
-        Goal::TargetPrice { price, without_card } => format!(
-            "цена товара не дороже {}{}",
-            rub(price),
-            if without_card { " без Ozon Карты" } else { "" }
-        ),
+        Goal::TargetPrice { price, without_card } => {
+            let condition = watch.source.without_price_condition().filter(|_| without_card);
+            format!(
+                "цена товара не дороже {}{}",
+                rub(price),
+                condition.map(|condition| format!(" {condition}")).unwrap_or_default()
+            )
+        }
     };
     let radius = watch
         .radius_km

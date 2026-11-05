@@ -461,11 +461,10 @@ mod tests {
     #[ignore = "открывает браузер и ходит на живой Ozon: cargo test -- --ignored --test-threads=1"]
     async fn reads_product_page_on_live_site() {
         let ozon = Ozon::new(test_browser(), 1);
-        let link = SourceKind::Ozon
-            .parse_product_link(
-                "https://www.ozon.ru/product/sony-wh-ch520-naushniki-nakladnye-besprovodnye-chernye-895366703/",
-            )
-            .unwrap();
+        // Из свежей выдачи: товар, зашитый в тест ссылкой, Ozon со временем снимает (895366703 — к 5.11.2026).
+        let offers = ozon.search("наушники sony wh-ch520", Scope::default()).await.unwrap();
+        let offer = offers.iter().find(|offer| offer.name.contains("WH-CH520")).unwrap();
+        let link = SourceKind::Ozon.parse_product_link(&offer.url).unwrap();
 
         let product = ozon.product(&link).await.unwrap();
 

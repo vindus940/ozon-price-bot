@@ -184,25 +184,50 @@ impl SourceKind {
     /// Страницу одного товара читают магазины. У объявлений Авито её не читаем: каждая проверка — лишний переход
     /// на сайт, который и так ограничивал адрес за частые заходы.
     pub fn has_product_pages(self) -> bool {
-        matches!(self, SourceKind::Ozon | SourceKind::Dns)
+        matches!(self, SourceKind::Ozon | SourceKind::Dns | SourceKind::Wildberries)
     }
 
-    /// Две цены — с картой магазина и без неё — у Ozon (Ozon Карта); у ДНС цена одна.
+    /// Две цены — с условием и без него — видны на странице товара Ozon (Ozon Карта) и Wildberries (WB Кошелёк);
+    /// у ДНС цена одна, страницу Маркета программа не читает.
     pub fn has_card_price(self) -> bool {
-        self == SourceKind::Ozon
+        self.without_price_condition().is_some()
     }
 
-    /// Ссылка на страницу товара для слежки за его ценой: у Ozon и ДНС адрес товара начинается с `/product/`.
+    /// Как назвать цену без условия из `price_condition`.
+    pub fn without_price_condition(self) -> Option<&'static str> {
+        match self {
+            SourceKind::Ozon => Some("без Ozon Карты"),
+            SourceKind::Wildberries => Some("без WB Кошелька"),
+            SourceKind::Avito | SourceKind::Dns | SourceKind::YandexMarket => None,
+        }
+    }
+
+    /// Как выглядит адрес страницы товара: для подсказки в форме слежки.
+    pub fn product_link_sample(self) -> String {
+        match self {
+            SourceKind::Wildberries => format!("https://{}/catalog/…/detail.aspx", self.site()),
+            _ => format!("https://{}/product/…", self.site()),
+        }
+    }
+
+    fn is_product_path(self, path: &str) -> bool {
+        match self {
+            SourceKind::Wildberries => path.starts_with("/catalog/") && path.ends_with("/detail.aspx"),
+            _ => path.starts_with("/product/"),
+        }
+    }
+
+    /// Ссылка на страницу товара для слежки за его ценой.
     /// Параметры после `?` — метки, откуда пришли, цене они не нужны.
     pub fn parse_product_link(self, text: &str) -> Result<Url, String> {
         if !self.has_product_pages() {
             return Err(format!(
-                "Следить за ценой товара по ссылке можно на Ozon и в ДНС, у {} — нет",
+                "Следить за ценой товара по ссылке можно на Ozon, Wildberries и в ДНС, у {} — нет",
                 self.genitive()
             ));
         }
         let mut link = self.parse_link(text)?;
-        if !link.path().starts_with("/product/") {
+        if !self.is_product_path(link.path()) {
             return Err(
                 "Это ссылка не на товар — откройте страницу товара и скопируйте адрес из адресной строки".to_string(),
             );
@@ -505,6 +530,19 @@ mod tests {
         let avito = SourceKind::Avito
             .parse_product_link("https://www.avito.ru/moskva/audio_i_video/naushniki_8284433652")
             .unwrap_err();
-        assert!(avito.contains("на Ozon и в ДНС"), "{avito}");
+        assert!(avito.contains("на Ozon, Wildberries и в ДНС"), "{avito}");
+
+        let wildberries = SourceKind::Wildberries
+            .parse_product_link("https://www.wildberries.ru/catalog/880195976/detail.aspx?targetUrl=SP&size=1")
+            .unwrap();
+        assert_eq!(
+            wildberries.as_str(),
+            "https://www.wildberries.ru/catalog/880195976/detail.aspx"
+        );
+        assert!(
+            SourceKind::Wildberries
+                .parse_product_link("https://www.wildberries.ru/catalog/0/search.aspx?search=sony")
+                .is_err()
+        );
     }
 }

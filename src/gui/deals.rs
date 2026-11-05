@@ -1,7 +1,7 @@
 use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD};
-use crate::format::{price_drop, rub, signed_rub, tile_marks};
+use crate::format::{capitalized, price_drop, rub, signed_rub, tile_marks};
 use crate::hunt::{Deal, Hunter, Miss};
 
 /// Что показать после «мимо»: находка скрыта, а эти слова можно добавить слежке в стоп-слова.
@@ -190,14 +190,6 @@ fn notice_panel(ui: &mut egui::Ui, hunter: &Hunter, notice: &mut Option<DismissN
     if done {
         *notice = None;
     }
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

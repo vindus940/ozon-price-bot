@@ -58,7 +58,7 @@ fn card(
             ui.weak(format!(
                 "{}{category} · {}",
                 watch.source.title(),
-                goal_summary(watch.goal)
+                goal_summary(watch.goal, watch.source)
             ));
         });
         ui.label(conditions(watch));
@@ -114,15 +114,18 @@ fn card(
     });
 }
 
-fn goal_summary(goal: Goal) -> String {
+fn goal_summary(goal: Goal, source: SourceKind) -> String {
     match goal {
         Goal::BelowMarket { min_discount_percent } => format!("ниже рынка от {min_discount_percent}%"),
         Goal::Resale { min_profit, .. } => format!("перепродажа: выгода от {}", rub(min_profit)),
-        Goal::TargetPrice { price, without_card } => format!(
-            "цена товара не дороже {}{}",
-            rub(price),
-            if without_card { " без Ozon Карты" } else { "" }
-        ),
+        Goal::TargetPrice { price, without_card } => {
+            let condition = source.without_price_condition().filter(|_| without_card);
+            format!(
+                "цена товара не дороже {}{}",
+                rub(price),
+                condition.map(|condition| format!(" {condition}")).unwrap_or_default()
+            )
+        }
     }
 }
 

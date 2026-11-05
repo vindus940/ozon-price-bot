@@ -79,7 +79,7 @@ impl OfferSearch {
     fn asked(&self, request: &SearchRequest) -> impl Iterator<Item = &(SourceKind, Arc<dyn OfferSource>)> {
         self.sources
             .iter()
-            .filter(|(kind, _)| !request.shop.only_ozon || kind.has_marketplace_seller())
+            .filter(|(kind, _)| !request.shop.needs_marketplace() || kind.has_marketplace_seller())
     }
 
     pub fn kinds(&self, request: &SearchRequest) -> Vec<SourceKind> {
@@ -397,6 +397,33 @@ mod tests {
         .only(&[SourceKind::Ozon]);
 
         let findings = search.find(&SearchRequest::parse("наушники sony")).await.unwrap();
+
+        assert_eq!(sourced(&findings), [(SourceKind::Ozon, 3000)]);
+        assert!(visits.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn verified_brand_keeps_only_marked_offers_and_does_not_visit_other_sites() {
+        let wildberries = FakeSource::returning(Vec::new());
+        let visits = wildberries.queries();
+        let search = OfferSearch::new(vec![
+            (
+                SourceKind::Ozon,
+                Arc::new(FakeSource::returning(vec![
+                    Offer {
+                        brand_verified: true,
+                        ..Offer::sample("Наушники Sony", 3000)
+                    },
+                    Offer::sample("Наушники Sony", 2000),
+                ])),
+            ),
+            (SourceKind::Wildberries, Arc::new(wildberries)),
+        ]);
+
+        let findings = search
+            .find(&SearchRequest::parse("наушники sony бренд проверен"))
+            .await
+            .unwrap();
 
         assert_eq!(sourced(&findings), [(SourceKind::Ozon, 3000)]);
         assert!(visits.lock().unwrap().is_empty());

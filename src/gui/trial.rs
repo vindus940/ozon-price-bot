@@ -39,7 +39,11 @@ fn product_price(product: &Product) -> String {
     match (product.price, product.price_without_card) {
         (None, _) => "Сейчас товара нет в продаже".to_string(),
         (Some(price), Some(without_card)) if without_card != price => {
-            format!("Сейчас {} с Ozon Картой, {} без неё", rub(price), rub(without_card))
+            format!(
+                "Сейчас {} с картой или кошельком магазина, {} без них",
+                rub(price),
+                rub(without_card)
+            )
         }
         (Some(price), _) => format!("Сейчас {}", rub(price)),
     }

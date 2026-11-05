@@ -498,8 +498,12 @@ mod tests {
         assert_eq!(prices.offers.len(), 2);
         assert_eq!(
             seen.into_inner().unwrap(),
-            [(1, vec![SourceKind::Wildberries]), (2, Vec::new())],
-            "сначала быстрая площадка и кого ждём, потом обе"
+            [
+                (1, vec![SourceKind::Wildberries]),
+                (2, Vec::new()),
+                (2, vec![SourceKind::Wildberries])
+            ],
+            "сначала быстрая площадка и кого ждём, потом обе, потом страница лучшего предложения"
         );
     }
 
