@@ -1,0 +1,4 @@
+# Та же версия у разработчика и в проверках на GitHub: новая версия clippy приносит новые замечания сама по себе.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]
