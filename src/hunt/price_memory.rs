@@ -147,8 +147,8 @@ impl PriceMemory {
         let points = self.points.lock().unwrap();
         let mut queries: Vec<SearchedQuery> = points
             .0
-            .iter()
-            .filter_map(|(_, points)| {
+            .values()
+            .filter_map(|points| {
                 let last = points.last()?;
                 Some(SearchedQuery {
                     query: last.asked.clone(),
