@@ -131,7 +131,10 @@ pub async fn hunt_offers(
     report: impl Fn(OffersProgress) + Send + Sync,
 ) -> Result<Findings, (SourceKind, SourceError)> {
     if !request.wants_lowest_price() {
-        return search.find(request).await;
+        let mut findings = search.find_for_market(request).await?;
+        mark_suspicious(&mut findings, request, None);
+        findings.refine(request);
+        return Ok(findings);
     }
     let wanted = OfferFilter::new(request);
     let tell = |findings: &Findings, market: Option<Market>, waiting: &[SourceKind]| {
@@ -145,8 +148,25 @@ pub async fn hunt_offers(
             deeper: market.is_some(),
         });
     };
-    let (findings, _) = two_passes(search, request, Category::Any, false, tell).await?;
+    let (mut findings, market) = two_passes(search, request, Category::Any, false, tell).await?;
+    mark_suspicious(&mut findings, request, market);
+    findings.refine(request);
     Ok(findings)
+}
+
+/// До отбора по условиям запроса: при «до 5000» настоящие цены дорогой модели в ответ не попадут, а судить копии нужны.
+fn mark_suspicious(findings: &mut Findings, request: &SearchRequest, market: Option<Market>) {
+    // Рынок фасованного — рынок мешков и пачек вперемешку: маленькая пачка рядом с ним не подозрительна.
+    let packed = findings.packed_in.is_some() || request.per_unit.is_some();
+    let market = market
+        .or_else(|| market_of(Category::Any, request, findings, false))
+        .filter(|_| !packed);
+    let usual = usual_model_prices(Category::Any, request, findings);
+    let many_models = model_key(&request.query).is_none();
+    for found in &mut findings.suitable {
+        found.suspicious = price_to_compare(&found.offer, &usual, market, many_models)
+            .is_some_and(|usual| suspiciously_cheap(usual, found.offer.price));
+    }
 }
 
 /// Популярная выдача показывает рынок, но самое дешёвое бывает в ней далеко: поэтому второй проход — от дешёвых,
@@ -213,7 +233,6 @@ async fn two_passes(
         },
         None => {}
     }
-    findings.refine(request);
     Ok((findings, market))
 }
 
@@ -271,7 +290,7 @@ fn priced(
 
     let prices: Vec<u64> = same.iter().map(|(_, offer, _)| offer.price).collect();
     let market = market.or_else(|| Market::of(&prices));
-    let usual = usual_model_prices(&same);
+    let usual = usual_model_prices(category, request, findings);
     let many_models = model_key(&request.query).is_none();
     let offers: Vec<PricedOffer> = same
         .into_iter()
@@ -297,12 +316,22 @@ fn priced(
 /// Обычная цена каждой модели в магазинах. На широком запросе рынок один на все модели, и копия дорогой модели за 4 500 ₽
 /// выглядит честной ценой рядом с дешёвыми моделями (WH-1000XM6 при настоящих 25 000 ₽, 05.11.2026). Берётся верхняя
 /// из двух средних цен: копий бывает столько же, сколько настоящих. Выброс вверх на неё не влияет, поэтому честная
-/// цена рядом с одним перекупом подозрительной не становится.
-fn usual_model_prices(offers: &[(SourceKind, Offer, bool)]) -> HashMap<BTreeSet<String>, u64> {
+/// цена рядом с одним перекупом подозрительной не становится. Считается по всем находкам, а не только по заказанным:
+/// при «до 5000» настоящие цены дорогой модели нужны, чтобы увидеть копию.
+fn usual_model_prices(
+    category: Category,
+    request: &SearchRequest,
+    findings: &Findings,
+) -> HashMap<BTreeSet<String>, u64> {
     let mut prices: HashMap<BTreeSet<String>, Vec<u64>> = HashMap::new();
-    for (source, offer, used) in offers {
-        if let Some(key) = model_key(&offer.name).filter(|_| !used && !source.has_used_goods()) {
-            prices.entry(key).or_default().push(offer.price);
+    let shop_offers = findings
+        .suitable
+        .iter()
+        .filter(|found| !found.source.has_used_goods() && !looks_used(&found.offer))
+        .filter(|found| category.accepts(&request.query, &found.offer));
+    for found in shop_offers {
+        if let Some(key) = model_key(&found.offer.name) {
+            prices.entry(key).or_default().push(found.offer.price);
         }
     }
     prices
@@ -358,6 +387,7 @@ mod tests {
                 ..Offer::sample(name, price)
             },
             unit_price: None,
+            suspicious: false,
         }
     }
 
@@ -790,6 +820,96 @@ mod tests {
     }
 
     #[test]
+    fn real_prices_above_the_limit_of_the_request_still_expose_a_copy() {
+        let offers = vec![
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6", 2_500),
+            found(SourceKind::Wildberries, "Наушники Sony WH-1000XM6", 25_000),
+            found(SourceKind::Ozon, "Наушники Sony WH-1000XM6 серые", 26_000),
+            found(SourceKind::Dns, "Наушники Sony WH-1000XM6", 27_000),
+        ];
+        let request = SearchRequest::parse("наушники sony до 5000");
+
+        let prices = best_prices(Category::Any, &request, &findings(offers), false);
+
+        assert_eq!(prices.offers.len(), 1);
+        assert!(prices.offers[0].suspicious);
+    }
+
+    fn copies_and_real_ones() -> FakeSource {
+        let named = |price, name: &str| Offer {
+            url: format!("https://example.com/{price}"),
+            ..Offer::sample(name, price)
+        };
+        FakeSource::returning(vec![
+            named(2_500, "Наушники Sony WH-1000XM6"),
+            named(25_000, "Наушники Sony WH-1000XM6"),
+            named(26_000, "Наушники Sony WH-1000XM6 серые"),
+            named(27_000, "Наушники Sony WH-1000XM6 черные"),
+            named(4_000, "Наушники Sony WH-CH520"),
+        ])
+    }
+
+    async fn suspicious_in_answer(text: &str) -> Vec<(u64, bool)> {
+        let search = OfferSearch::new(vec![(SourceKind::Ozon, Arc::new(copies_and_real_ones()))]);
+        let findings = hunt_offers(&search, &SearchRequest::parse(text), |_| {})
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+        findings
+            .suitable
+            .iter()
+            .map(|found| (found.offer.price, found.suspicious))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn bot_marks_a_copy_and_leaves_honest_offers_alone() {
+        let answer = suspicious_in_answer("наушники sony").await;
+
+        assert_eq!(answer[..2], [(2_500, true), (4_000, false)]);
+    }
+
+    #[tokio::test]
+    async fn bot_marks_a_copy_even_when_real_prices_are_above_the_limit() {
+        assert_eq!(
+            suspicious_in_answer("наушники sony до 5000").await,
+            [(2_500, true), (4_000, false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn small_pack_next_to_big_ones_is_not_a_copy() {
+        let packs = [
+            ("Порошок Persil 450 г", 180),
+            ("Порошок Persil 3 кг", 750),
+            ("Порошок Persil 4 кг", 900),
+            ("Порошок Persil 5 кг", 1_100),
+            ("Порошок Persil 6 кг", 1_400),
+        ]
+        .map(|(name, price)| Offer {
+            url: format!("https://example.com/{price}"),
+            ..Offer::sample(name, price)
+        });
+        let search = OfferSearch::new(vec![(
+            SourceKind::Ozon,
+            Arc::new(FakeSource::returning(packs.to_vec())),
+        )]);
+
+        let findings = hunt_offers(&search, &SearchRequest::parse("persil"), |_| {})
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+
+        assert_eq!(findings.suitable.len(), 5);
+        assert!(findings.suitable.iter().all(|found| !found.suspicious));
+    }
+
+    #[tokio::test]
+    async fn bot_marks_a_copy_in_an_answer_by_discount_too() {
+        let answer = suspicious_in_answer("наушники sony по скидке до 5000").await;
+
+        assert!(answer.contains(&(2_500, true)), "{answer:?}");
+    }
+
+    #[test]
     fn rare_model_on_a_broad_query_has_nothing_to_be_compared_with() {
         let mut offers = cheap_models_around_a_copy();
         offers.insert(0, found(SourceKind::Wildberries, "Наушники Sony MDR-EX15AP", 700));
@@ -1029,8 +1149,13 @@ mod tests {
             findings.suitable.len(),
             findings.failed
         );
-        for found in findings.suitable.iter().take(5) {
-            println!("{:?} {} ₽ {}", found.source, found.offer.price, found.offer.name);
+        for found in findings.suitable.iter().take(12) {
+            let mark = if found.suspicious {
+                "подозрительно"
+            } else {
+                ""
+            };
+            println!("{:?} {} ₽ {} {mark}", found.source, found.offer.price, found.offer.name);
         }
         assert!(!findings.suitable.is_empty());
         assert!(findings.suitable.iter().all(|found| found.offer.price <= 3_500));

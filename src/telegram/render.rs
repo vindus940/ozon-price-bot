@@ -392,11 +392,14 @@ pub(super) fn page(request: &SearchRequest, findings: &Findings, from: usize, to
 /// При цене за единицу не показывается: самая дешёвая пачка там ни о чём не говорит.
 fn lowest_by_source(findings: &Findings) -> String {
     let mut lowest: Vec<(u64, SourceKind)> = Vec::new();
-    for found in &findings.suitable {
+    for found in findings.suitable.iter().filter(|found| !found.suspicious) {
         match lowest.iter_mut().find(|(_, source)| *source == found.source) {
             Some((price, _)) => *price = found.offer.price.min(*price),
             None => lowest.push((found.offer.price, found.source)),
         }
+    }
+    if lowest.is_empty() {
+        return String::new();
     }
     lowest.sort_by_key(|&(price, _)| price);
     let line: Vec<String> = lowest
@@ -551,6 +554,11 @@ fn offer_entry(place: usize, found: &Finding, with_source: bool, believable_old_
         }
         _ => "",
     };
+    let doubtful = if found.suspicious {
+        "\n⚠️ Намного дешевле обычного: скорее копия или ошибка, чем выгода"
+    } else {
+        ""
+    };
     let unit_price = found.unit_price.map(|price| format!(" · {price}")).unwrap_or_default();
     let source = if with_source {
         format!(" · {}", found.source.title())
@@ -568,7 +576,7 @@ fn offer_entry(place: usize, found: &Finding, with_source: bool, believable_old_
     };
     let marks = marks_line(offer);
     format!(
-        "\n{place}. <b>{price}</b>{unit_price}{discount}{source}\n<a href=\"{url}\">{name}</a>{rating}{marks}{inflated}\n",
+        "\n{place}. <b>{price}</b>{unit_price}{discount}{source}\n<a href=\"{url}\">{name}</a>{rating}{marks}{doubtful}{inflated}\n",
         price = rub(offer.price),
         url = escape(&offer.url),
         name = escape(&shorten(&offer.name, NAME_LIMIT)),
@@ -870,6 +878,7 @@ mod tests {
                     source: SourceKind::Ozon,
                     offer,
                     unit_price: None,
+                    suspicious: false,
                 })
                 .collect(),
             packed_in: None,
@@ -908,6 +917,34 @@ mod tests {
             ..findings(Vec::new())
         };
         assert!(rendered(&request, &nothing, 10).contains("⚠️ Без Яндекс Маркета"));
+    }
+
+    #[test]
+    fn doubtful_price_is_shown_with_a_warning_but_not_as_the_lowest_of_its_source() {
+        let mut found = findings(vec![Offer::sample("Наушники", 900), Offer::sample("Наушники", 3_000)]);
+        found.suitable[0].suspicious = true;
+        found.suitable[1].source = SourceKind::Wildberries;
+
+        let text = rendered(&SearchRequest::parse("наушники"), &found, 10);
+
+        assert_eq!(text.matches("Намного дешевле обычного").count(), 1, "{text}");
+        assert!(
+            text.contains("Самые низкие цены без доставки: Wildberries 3\u{a0}000\u{a0}₽ с WB Кошельком\nПодходят"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_lowest_prices_line_when_every_price_is_doubtful() {
+        let mut found = findings(vec![Offer::sample("Наушники", 900), Offer::sample("Наушники", 1_000)]);
+        found.suitable[1].source = SourceKind::Wildberries;
+        for offer in &mut found.suitable {
+            offer.suspicious = true;
+        }
+
+        let text = rendered(&SearchRequest::parse("наушники"), &found, 10);
+
+        assert!(!text.contains("Самые низкие цены"), "{text}");
     }
 
     #[test]
@@ -1053,6 +1090,7 @@ mod tests {
                 kopecks: rubles * 100,
                 unit: Unit::Kilogram,
             }),
+            suspicious: false,
         }
     }
 

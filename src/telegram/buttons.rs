@@ -202,6 +202,7 @@ mod tests {
                     ..Offer::sample("Наушники Sony", price)
                 },
                 unit_price: None,
+                suspicious: false,
             })
             .collect();
         Answer::new(

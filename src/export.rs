@@ -89,6 +89,7 @@ mod tests {
             source: SourceKind::Ozon,
             offer,
             unit_price,
+            suspicious: false,
         }
     }
 

@@ -49,6 +49,8 @@ pub struct Finding {
     pub offer: Offer,
     /// Только в единицах из запроса: у геля в литрах при поиске «за кг» её нет.
     pub unit_price: Option<UnitPrice>,
+    /// Намного дешевле обычного: скорее копия или ошибка, чем выгода. Судит об этом охотник (`hunt_offers`).
+    pub suspicious: bool,
 }
 
 impl OfferSearch {
@@ -178,6 +180,7 @@ fn arranged(
                 .filter(|quantity| Some(quantity.unit) == request.per_unit)
                 .map(|quantity| quantity.unit_price(offer.price)),
             offer,
+            suspicious: false,
         })
         .collect();
     Findings {

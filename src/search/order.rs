@@ -85,6 +85,7 @@ mod tests {
             source: SourceKind::Ozon,
             offer: Offer::sample(name, price),
             unit_price: None,
+            suspicious: false,
         }
     }
 
@@ -101,6 +102,7 @@ mod tests {
                 ..Offer::sample(name, price)
             },
             unit_price: None,
+            suspicious: false,
         }
     }
 
@@ -112,6 +114,7 @@ mod tests {
                 ..Offer::sample(name, price)
             },
             unit_price: None,
+            suspicious: false,
         }
     }
 
