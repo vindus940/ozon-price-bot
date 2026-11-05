@@ -92,6 +92,8 @@ pub(super) struct Answer {
     findings: Findings,
     from: usize,
     shown: usize,
+    /// Сколько строк в списке: одна модель занимает одну строку, поэтому не столько же, сколько предложений.
+    total: usize,
 }
 
 impl Answer {
@@ -101,13 +103,14 @@ impl Answer {
             findings,
             from: 0,
             shown: 0,
+            total: 0,
         }
     }
 
     pub(super) fn apply(&mut self, press: Press) {
         match press {
             // Двойное нажатие: вторая кнопка ещё на экране, а листать уже некуда.
-            Press::More(_) if self.from + self.shown < self.findings.suitable.len() => self.from += self.shown,
+            Press::More(_) if self.from + self.shown < self.total => self.from += self.shown,
             Press::ByDiscount(_) => {
                 self.request.order = Order::BiggestDiscount;
                 self.rearrange();
@@ -129,7 +132,8 @@ impl Answer {
     pub(super) fn show(&mut self, key: u64, top: usize) -> (String, InlineKeyboardMarkup) {
         let page = render::page(&self.request, &self.findings, self.from, top);
         self.shown = page.shown;
-        let left = self.findings.suitable.len().saturating_sub(self.from + self.shown);
+        self.total = page.total;
+        let left = self.total.saturating_sub(self.from + self.shown);
         let actions = render::SearchActions {
             more: (left > 0).then_some(left.min(top)),
             by_discount: self.request.order != Order::BiggestDiscount && !self.findings.suitable.is_empty(),
@@ -214,6 +218,46 @@ mod tests {
                 failed: Vec::new(),
             },
         )
+    }
+
+    fn answer_of_one_model(models: &[&str]) -> Answer {
+        let suitable = models
+            .iter()
+            .enumerate()
+            .map(|(place, name)| Finding {
+                source: SourceKind::Ozon,
+                offer: Offer {
+                    url: format!("https://www.ozon.ru/product/{place}/"),
+                    ..Offer::sample(name, 3_000 + place as u64)
+                },
+                unit_price: None,
+                suspicious: false,
+            })
+            .collect();
+        Answer::new(
+            SearchRequest::parse("наушники sony"),
+            Findings {
+                scanned: 10,
+                suitable,
+                packed_in: None,
+                failed: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn more_counts_lines_of_the_list_and_not_offers_folded_into_them() {
+        let same = "Наушники Sony WH-CH520";
+        let mut folded = answer_of_one_model(&[same, same, same, "Наушники Sony WH-CH720", "Наушники Sony WH-CH510"]);
+
+        let (_, keyboard) = folded.show(7, 2);
+        assert_eq!(labels(&keyboard)[0], "Ещё 1");
+
+        folded.apply(Press::More(7));
+        let (text, keyboard) = folded.show(7, 2);
+
+        assert!(text.contains("\n3. "), "{text}");
+        assert!(!labels(&keyboard).iter().any(|label| label.starts_with("Ещё")));
     }
 
     #[test]

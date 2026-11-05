@@ -8,10 +8,10 @@ use crate::hunt::category::{Category, looks_used};
 use crate::hunt::deal::suspiciously_cheap;
 use crate::hunt::failure_reason;
 use crate::hunt::market::Market;
-use crate::hunt::model::model_key;
+use crate::hunt::model::{Foldable, fold_models, model_key};
 use crate::marketplace::{SourceError, SourceKind};
 use crate::offer::Offer;
-use crate::search::{Findings, OfferFilter, OfferSearch, SearchRequest};
+use crate::search::{Finding, Findings, OfferFilter, OfferSearch, SearchRequest};
 
 /// Из двух цен не понять, какая из них обычная: дешёвая может быть честной, а дорогая — перекупом.
 const OFFERS_TO_KNOW_MODEL_PRICE: usize = 3;
@@ -52,40 +52,23 @@ impl BestPrices {
             .find(|found| !found.suspicious && found.source.has_used_goods())
     }
 
-    /// Предложения одной модели разных цветов и продавцов вместе, на месте первого из них. Сами предложения не меняются:
-    /// это только вид списка. Объявления и б/у не склеиваются, а подозрительно дешёвое — только между собой:
-    /// их цена — не цена этой модели.
+    /// Предложения одной модели вместе, на месте первого из них (`fold_models`).
     pub fn groups(&self) -> Vec<Vec<&PricedOffer>> {
-        let mut groups: Vec<Vec<&PricedOffer>> = Vec::new();
-        let mut by_model: HashMap<(bool, BTreeSet<String>), Vec<usize>> = HashMap::new();
-        for found in &self.offers {
-            let plain = !found.used && !found.source.has_used_goods();
-            let key = model_key(&found.offer.name)
-                .filter(|_| plain)
-                .map(|key| (found.suspicious, key));
-            let home = key.as_ref().and_then(|key| by_model.get(key)).and_then(|homes| {
-                homes
-                    .iter()
-                    .copied()
-                    .find(|&home| close_in_price(groups[home][0], found))
-            });
-            if let Some(home) = home {
-                groups[home].push(found);
-                continue;
-            }
-            if let Some(key) = key {
-                by_model.entry(key).or_default().push(groups.len());
-            }
-            groups.push(vec![found]);
-        }
-        groups
+        fold_models(&self.offers, |found| Foldable {
+            offer: &found.offer,
+            apart: found.used || found.source.has_used_goods(),
+            suspicious: found.suspicious,
+        })
     }
 }
 
-/// Вдвое другая цена при том же названии — уже не та же вещь: комплект, запчасть или ошибка в карточке.
-fn close_in_price(first: &PricedOffer, second: &PricedOffer) -> bool {
-    let (first, second) = (first.offer.price, second.offer.price);
-    first.max(second) <= first.min(second) * 2
+/// То же для ответа бота: б/у он отдельно не считает, поэтому узнаётся по тексту предложения.
+pub fn same_model_groups(findings: &Findings) -> Vec<Vec<&Finding>> {
+    fold_models(&findings.suitable, |found| Foldable {
+        offer: &found.offer,
+        apart: found.source.has_used_goods() || looks_used(&found.offer),
+        suspicious: found.suspicious,
+    })
 }
 
 /// Что уже найдено, пока остальные площадки думают: быстрая площадка не должна ждать медленную.

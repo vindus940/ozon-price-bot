@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
+use crate::offer::Offer;
 use crate::text::words;
 
 /// Цвет и общие слова карточки: от них модель не меняется. Русских цветов здесь нет: кириллица в отпечаток не идёт.
@@ -57,6 +58,47 @@ pub(super) fn model_key(title: &str) -> Option<BTreeSet<String>> {
     }
     let key: BTreeSet<String> = title_words.into_iter().filter(|word| tells_model(word)).collect();
     key.iter().any(|word| is_model_number(word)).then_some(key)
+}
+
+/// Что склейке нужно знать о предложении.
+pub(super) struct Foldable<'a> {
+    pub(super) offer: &'a Offer,
+    /// Объявление или б/у: их цена — не цена этой модели.
+    pub(super) apart: bool,
+    pub(super) suspicious: bool,
+}
+
+/// Предложения одной модели разных цветов и продавцов вместе, на месте первого из них. Сами предложения не меняются:
+/// это только вид списка. Подозрительно дешёвое склеивается только между собой.
+pub(super) fn fold_models<'a, T>(items: &'a [T], view: impl Fn(&'a T) -> Foldable<'a>) -> Vec<Vec<&'a T>> {
+    let mut groups: Vec<Vec<&T>> = Vec::new();
+    let mut by_model: HashMap<(bool, BTreeSet<String>), Vec<usize>> = HashMap::new();
+    for item in items {
+        let found = view(item);
+        let key = model_key(&found.offer.name)
+            .filter(|_| !found.apart)
+            .map(|key| (found.suspicious, key));
+        let home = key.as_ref().and_then(|key| by_model.get(key)).and_then(|homes| {
+            homes
+                .iter()
+                .copied()
+                .find(|&home| close_in_price(view(groups[home][0]).offer, found.offer))
+        });
+        if let Some(home) = home {
+            groups[home].push(item);
+            continue;
+        }
+        if let Some(key) = key {
+            by_model.entry(key).or_default().push(groups.len());
+        }
+        groups.push(vec![item]);
+    }
+    groups
+}
+
+/// Вдвое другая цена при том же названии — уже не та же вещь: комплект, запчасть или ошибка в карточке.
+fn close_in_price(first: &Offer, second: &Offer) -> bool {
+    first.price.max(second.price) <= first.price.min(second.price) * 2
 }
 
 fn tells_model(word: &str) -> bool {

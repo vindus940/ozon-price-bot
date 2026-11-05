@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD, WARN};
-use crate::format::{rub, source_price, tile_marks};
+use crate::format::{rub, same_model, source_price, tile_marks};
 use crate::hunt::{BestPrices, Category, PriceProgress, PricedOffer, failure_reason, hunt_best_prices};
 use crate::marketplace::SourceKind;
 use crate::search::{OfferSearch, SearchRequest};
@@ -193,19 +193,7 @@ fn results(ui: &mut egui::Ui, prices: &BestPrices) {
 }
 
 fn same_model_line(others: &[&PricedOffer]) -> String {
-    let mut sources: Vec<&str> = Vec::new();
-    for found in others {
-        if !sources.contains(&found.source.title()) {
-            sources.push(found.source.title());
-        }
-    }
-    let highest = others.iter().map(|found| found.offer.price).max().unwrap_or_default();
-    format!(
-        "Та же модель: ещё {}, до {} · {}",
-        others.len(),
-        rub(highest),
-        sources.join(", ")
-    )
+    same_model(others.iter().map(|found| (found.source, found.offer.price)))
 }
 
 fn summary(prices: &BestPrices) -> String {

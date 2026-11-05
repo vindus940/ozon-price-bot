@@ -2,9 +2,11 @@ use teloxide::types::{BotCommand, InlineKeyboardButton, InlineKeyboardMarkup};
 
 use super::WatchAction;
 use super::buttons::{Press, deal_key};
-use crate::format::{price_drop, rub, signed_rub, source_price, tile_marks};
+use crate::format::{price_drop, rub, same_model, signed_rub, source_price, tile_marks};
 use crate::health::{Health, Problem};
-use crate::hunt::{Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SourceReport, Watch};
+use crate::hunt::{
+    Alert, Deal, Goal, Lowest, Miss, OffersProgress, Outcome, Pause, RunStatus, SourceReport, Watch, same_model_groups,
+};
 use crate::marketplace::{Product, SiteStatus, SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::search::{Finding, Findings, Order, PriceRange, SearchRequest};
@@ -232,10 +234,12 @@ fn listed(names: &[&str]) -> String {
     }
 }
 
-/// Часть ответа на поиск и сколько предложений в неё вошло: длинные названия могут упереться в предел сообщения.
+/// Часть ответа на поиск и сколько строк списка в неё вошло: длинные названия могут упереться в предел сообщения.
+/// Строка — предложение вместе со свёрнутыми под ним той же модели, `total` — сколько таких строк во всём ответе.
 pub(super) struct Page {
     pub(super) text: String,
     pub(super) shown: usize,
+    pub(super) total: usize,
 }
 
 /// Какие кнопки нужны под ответом. `more` — сколько предложений покажет «Ещё».
@@ -353,6 +357,7 @@ pub(super) fn page(request: &SearchRequest, findings: &Findings, from: usize, to
                 findings.scanned
             ),
             shown: 0,
+            total: 0,
         };
     }
 
@@ -373,9 +378,15 @@ pub(super) fn page(request: &SearchRequest, findings: &Findings, from: usize, to
     );
     let hint = unit_price_hint(request, findings) + &left_out;
     let believable_old_price = findings.believable_old_price();
+    let groups = same_model_groups(findings);
     let mut shown = 0;
-    for (index, found) in findings.suitable.iter().enumerate().skip(from).take(top) {
-        let entry = offer_entry(index + 1, found, several_sources, believable_old_price);
+    for (index, group) in groups.iter().enumerate().skip(from).take(top) {
+        let mut entry = offer_entry(index + 1, group[0], several_sources, believable_old_price);
+        if group.len() > 1 {
+            let others = group[1..].iter().map(|found| (found.source, found.offer.price));
+            entry += &same_model(others);
+            entry += " — в таблице\n";
+        }
         if text.chars().count() + entry.chars().count() + hint.chars().count() > MESSAGE_LIMIT {
             break;
         }
@@ -385,6 +396,7 @@ pub(super) fn page(request: &SearchRequest, findings: &Findings, from: usize, to
     Page {
         text: text + &hint,
         shown,
+        total: groups.len(),
     }
 }
 
@@ -917,6 +929,30 @@ mod tests {
             ..findings(Vec::new())
         };
         assert!(rendered(&request, &nothing, 10).contains("⚠️ Без Яндекс Маркета"));
+    }
+
+    #[test]
+    fn one_model_takes_one_place_in_the_list_and_says_what_is_folded() {
+        let mut found = findings(vec![
+            Offer::sample("Наушники Sony WH-CH520 черные", 3_000),
+            Offer::sample("Наушники Sony WH-CH720", 3_100),
+            Offer::sample("Наушники Sony WH-CH520 белые", 3_200),
+            Offer::sample("SONY наушники WH-CH520, синие", 3_500),
+        ]);
+        found.suitable[3].source = SourceKind::Wildberries;
+
+        let page = page(&SearchRequest::parse("наушники sony"), &found, 0, 10);
+
+        assert_eq!((page.shown, page.total), (2, 2));
+        assert!(page.text.contains("Подходят 4 из"), "{}", page.text);
+        assert!(
+            page.text
+                .contains("Та же модель: ещё 2, до 3\u{a0}500\u{a0}₽ · Ozon, Wildberries — в таблице\n"),
+            "{}",
+            page.text
+        );
+        assert!(page.text.contains("\n2. <b>3\u{a0}100"), "{}", page.text);
+        assert!(!page.text.contains("\n3. "), "{}", page.text);
     }
 
     #[test]

@@ -9,6 +9,24 @@ pub fn source_price(source: SourceKind, price: u64) -> String {
     }
 }
 
+/// Что свёрнуто под предложением: «Та же модель: ещё 3, до 3 500 ₽ · Ozon, Wildberries».
+pub fn same_model(others: impl IntoIterator<Item = (SourceKind, u64)>) -> String {
+    let mut sources: Vec<&str> = Vec::new();
+    let (mut count, mut highest) = (0, 0);
+    for (source, price) in others {
+        count += 1;
+        highest = highest.max(price);
+        if !sources.contains(&source.title()) {
+            sources.push(source.title());
+        }
+    }
+    format!(
+        "Та же модель: ещё {count}, до {} · {}",
+        rub(highest),
+        sources.join(", ")
+    )
+}
+
 /// Сумма в рублях с разбивкой на тысячи: 72500 → «72 500 ₽» (с неразрывными пробелами).
 pub fn rub(amount: u64) -> String {
     let digits = amount.to_string();
