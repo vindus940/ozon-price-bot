@@ -272,12 +272,11 @@ fn priced(
     let prices: Vec<u64> = same.iter().map(|(_, offer, _)| offer.price).collect();
     let market = market.or_else(|| Market::of(&prices));
     let usual = usual_model_prices(&same);
+    let many_models = model_key(&request.query).is_none();
     let offers: Vec<PricedOffer> = same
         .into_iter()
         .map(|(source, offer, used)| PricedOffer {
-            suspicious: model_key(&offer.name)
-                .and_then(|key| usual.get(&key).copied())
-                .or(market.map(|market| market.median))
+            suspicious: price_to_compare(&offer, &usual, market, many_models)
                 .is_some_and(|usual| suspiciously_cheap(usual, offer.price)),
             source,
             offer,
@@ -314,6 +313,21 @@ fn usual_model_prices(offers: &[(SourceKind, Offer, bool)]) -> HashMap<BTreeSet<
             (key, prices[prices.len() / 2])
         })
         .collect()
+}
+
+/// С чем сравнить цену предложения. Запрос без номера модели собирает разные модели, и их общий рынок о редкой модели
+/// ничего не говорит: честные MDR-EX15AP за 704 ₽ при рынке 8 600 ₽ (05.11.2026) не подозрительны, их просто не с чем сравнить.
+fn price_to_compare(
+    offer: &Offer,
+    usual: &HashMap<BTreeSet<String>, u64>,
+    market: Option<Market>,
+    many_models: bool,
+) -> Option<u64> {
+    let market = market.map(|market| market.median);
+    match model_key(&offer.name) {
+        Some(key) => usual.get(&key).copied().or(market.filter(|_| !many_models)),
+        None => market,
+    }
 }
 
 fn lowest_by_source(offers: &[PricedOffer]) -> Vec<(SourceKind, u64)> {
@@ -773,6 +787,36 @@ mod tests {
 
         assert_eq!(prices.market.unwrap().median, 9_000);
         assert!(prices.offers.iter().all(|found| !found.suspicious));
+    }
+
+    #[test]
+    fn rare_model_on_a_broad_query_has_nothing_to_be_compared_with() {
+        let mut offers = cheap_models_around_a_copy();
+        offers.insert(0, found(SourceKind::Wildberries, "Наушники Sony MDR-EX15AP", 700));
+
+        let prices = broad_query(offers);
+
+        assert_eq!(prices.best().unwrap().offer.price, 700);
+    }
+
+    #[test]
+    fn query_for_one_model_still_compares_a_rare_title_with_the_market() {
+        let mut offers = market_of_five();
+        offers.insert(0, found(SourceKind::Ozon, "Наушники Sony WH-CH520 EU1", 900));
+
+        let prices = best_prices(Category::Electronics, &request(), &findings(offers), false);
+
+        assert!(prices.offers[0].suspicious);
+    }
+
+    #[test]
+    fn title_without_a_model_number_is_still_compared_with_the_market() {
+        let mut offers = cheap_models_around_a_copy();
+        offers.insert(0, found(SourceKind::Ozon, "Наушники Sony", 700));
+
+        let prices = broad_query(offers);
+
+        assert!(prices.offers[0].suspicious);
     }
 
     #[test]
