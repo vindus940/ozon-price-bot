@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -8,6 +8,7 @@ use crate::hunt::category::{Category, looks_used};
 use crate::hunt::deal::suspiciously_cheap;
 use crate::hunt::failure_reason;
 use crate::hunt::market::Market;
+use crate::hunt::model::model_key;
 use crate::marketplace::{SourceError, SourceKind};
 use crate::offer::Offer;
 use crate::search::{Findings, OfferFilter, OfferSearch, SearchRequest};
@@ -47,6 +48,38 @@ impl BestPrices {
             .iter()
             .find(|found| !found.suspicious && found.source.has_used_goods())
     }
+
+    /// Предложения одной модели разных цветов и продавцов вместе, на месте первого из них. Сами предложения не меняются:
+    /// это только вид списка. Объявления, б/у и подозрительно дешёвое не склеиваются: их цена — не цена этой модели.
+    pub fn groups(&self) -> Vec<Vec<&PricedOffer>> {
+        let mut groups: Vec<Vec<&PricedOffer>> = Vec::new();
+        let mut by_model: HashMap<BTreeSet<String>, Vec<usize>> = HashMap::new();
+        for found in &self.offers {
+            let plain = !found.used && !found.suspicious && !found.source.has_used_goods();
+            let key = model_key(&found.offer.name).filter(|_| plain);
+            let home = key.as_ref().and_then(|key| by_model.get(key)).and_then(|homes| {
+                homes
+                    .iter()
+                    .copied()
+                    .find(|&home| close_in_price(groups[home][0], found))
+            });
+            if let Some(home) = home {
+                groups[home].push(found);
+                continue;
+            }
+            if let Some(key) = key {
+                by_model.entry(key).or_default().push(groups.len());
+            }
+            groups.push(vec![found]);
+        }
+        groups
+    }
+}
+
+/// Вдвое другая цена при том же названии — уже не та же вещь: комплект, запчасть или ошибка в карточке.
+fn close_in_price(first: &PricedOffer, second: &PricedOffer) -> bool {
+    let (first, second) = (first.offer.price, second.offer.price);
+    first.max(second) <= first.min(second) * 2
 }
 
 /// Что уже найдено, пока остальные площадки думают: быстрая площадка не должна ждать медленную.
@@ -622,6 +655,53 @@ mod tests {
         assert_eq!(prices.failed[0].0, SourceKind::YandexMarket);
     }
 
+    fn grouped(offers: Vec<Finding>) -> Vec<Vec<u64>> {
+        let prices = best_prices(Category::Any, &SearchRequest::parse("sony"), &findings(offers), false);
+        prices
+            .groups()
+            .iter()
+            .map(|group| group.iter().map(|found| found.offer.price).collect())
+            .collect()
+    }
+
+    #[test]
+    fn one_model_from_different_sources_stands_together_at_the_place_of_the_cheapest() {
+        let groups = grouped(vec![
+            found(SourceKind::Wildberries, "Наушники Sony WH-CH520 черные", 3_000),
+            found(SourceKind::Ozon, "Наушники Sony WH-CH720", 3_100),
+            found(SourceKind::Ozon, "SONY наушники WH-CH520, синие", 3_200),
+            found(SourceKind::Dns, "Наушники Sony", 3_300),
+        ]);
+
+        assert_eq!(groups, [vec![3_000, 3_200], vec![3_100], vec![3_300]]);
+    }
+
+    #[test]
+    fn twice_the_price_under_the_same_name_is_not_glued() {
+        let groups = grouped(vec![
+            found(SourceKind::Ozon, "Наушники Sony WH-CH520", 1_000),
+            found(SourceKind::Ozon, "Наушники Sony WH-CH520 белые", 2_001),
+            found(SourceKind::Wildberries, "Наушники Sony WH-CH520", 2_100),
+        ]);
+
+        assert_eq!(groups, [vec![1_000], vec![2_001, 2_100]]);
+    }
+
+    #[test]
+    fn ads_used_and_suspicious_stay_apart_from_the_model() {
+        let shop = "Наушники Sony WH-CH520";
+        let mut offers = market_of_five();
+        offers.insert(0, found(SourceKind::Avito, shop, 3_000));
+        offers.insert(1, found(SourceKind::Ozon, "Наушники Sony WH-CH520 б/у", 3_100));
+        offers.insert(0, found(SourceKind::Ozon, shop, 900));
+
+        let prices = best_prices(Category::Electronics, &request(), &findings(offers), false);
+        let groups = prices.groups();
+
+        let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
+        assert_eq!(sizes, [1, 1, 1, 5]);
+    }
+
     #[test]
     fn best_price_comes_from_all_sources_and_each_shows_its_lowest() {
         let prices = best_prices(Category::Electronics, &request(), &findings(market_of_five()), false);
@@ -770,6 +850,39 @@ mod tests {
         }
         assert!(!findings.suitable.is_empty());
         assert!(findings.suitable.iter().all(|found| found.offer.price <= 3_500));
+    }
+
+    #[tokio::test]
+    #[ignore = "открывает браузер и ходит на живые Ozon, Wildberries и ДНС: cargo test -- --ignored --test-threads=1 --nocapture"]
+    async fn models_glued_on_live_sites_can_be_read_by_eye() {
+        use crate::marketplace::dns::Dns;
+        use crate::marketplace::ozon::Ozon;
+        use crate::marketplace::wildberries::Wildberries;
+
+        let browser = crate::browser::test_browser();
+        let search = OfferSearch::new(vec![
+            (SourceKind::Ozon, Arc::new(Ozon::new(Arc::clone(&browser), 3))),
+            (
+                SourceKind::Wildberries,
+                Arc::new(Wildberries::new(Arc::clone(&browser))),
+            ),
+            (SourceKind::Dns, Arc::new(Dns::new(browser))),
+        ]);
+        let request = SearchRequest::parse("наушники sony");
+
+        let prices = hunt_best_prices(&search, &request, Category::Electronics, false, &|_| {})
+            .await
+            .unwrap_or_else(|_| panic!("все площадки молчат"));
+
+        let groups = prices.groups();
+        println!("предложений {}, в списке {}", prices.offers.len(), groups.len());
+        for group in groups.iter().filter(|group| group.len() > 1) {
+            println!("---");
+            for found in group {
+                println!("{:?} {} ₽ {}", found.source, found.offer.price, found.offer.name);
+            }
+        }
+        assert!(groups.len() < prices.offers.len());
     }
 
     #[tokio::test]

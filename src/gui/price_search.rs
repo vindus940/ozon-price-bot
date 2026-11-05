@@ -176,10 +176,36 @@ fn results(ui: &mut egui::Ui, prices: &BestPrices) {
     }
     ui.add_space(6.0);
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        for found in &prices.offers {
-            row(ui, found);
+        for group in prices.groups() {
+            let (first, others) = (group[0], &group[1..]);
+            row(ui, first);
+            if !others.is_empty() {
+                egui::CollapsingHeader::new(same_model_line(others))
+                    .id_salt(&first.offer.url)
+                    .show(ui, |ui| {
+                        for found in others {
+                            row(ui, found);
+                        }
+                    });
+            }
         }
     });
+}
+
+fn same_model_line(others: &[&PricedOffer]) -> String {
+    let mut sources: Vec<&str> = Vec::new();
+    for found in others {
+        if !sources.contains(&found.source.title()) {
+            sources.push(found.source.title());
+        }
+    }
+    let highest = others.iter().map(|found| found.offer.price).max().unwrap_or_default();
+    format!(
+        "Та же модель: ещё {}, до {} · {}",
+        others.len(),
+        rub(highest),
+        sources.join(", ")
+    )
 }
 
 fn summary(prices: &BestPrices) -> String {
@@ -291,6 +317,26 @@ mod tests {
         assert_eq!(
             summary(&prices()),
             "Просмотрено 120, тот же товар — 0, другой отсеян — 30"
+        );
+    }
+
+    #[test]
+    fn same_model_line_says_how_many_up_to_what_price_and_where() {
+        let priced = |source, price| PricedOffer {
+            source,
+            offer: Offer::sample("Наушники Sony WH-CH520", price),
+            used: false,
+            suspicious: false,
+        };
+        let (ozon, wildberries, ozon_too) = (
+            priced(SourceKind::Ozon, 3_000),
+            priced(SourceKind::Wildberries, 3_500),
+            priced(SourceKind::Ozon, 3_200),
+        );
+
+        assert_eq!(
+            same_model_line(&[&ozon, &wildberries, &ozon_too]),
+            "Та же модель: ещё 3, до 3\u{a0}500\u{a0}₽ · Ozon, Wildberries"
         );
     }
 

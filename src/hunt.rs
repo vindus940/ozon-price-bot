@@ -10,6 +10,7 @@ mod history;
 mod journal;
 mod market;
 mod memory;
+mod model;
 mod schedule;
 mod trial;
 mod watch;
