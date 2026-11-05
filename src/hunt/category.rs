@@ -28,6 +28,19 @@ const DEFECTS: &[&str] = &[
     "с дефект",
 ];
 
+/// Другой товар в любой категории, хотя «для» в названии нет: «SONY WH-CH520 накладки на чашки наушников» (05.11.2026).
+/// Только то, что не спутать с описанием самой вещи: «наушники с мягкими амбушюрами» — сами наушники.
+const ACCESSORY_PHRASES: &[&str] = &["накладки на", "накладка на"];
+
+/// Аксессуар, названный первым словом, и часть слова, которая в запросе говорит, что ищут именно его:
+/// по запросу «чехол» подходят и «Чехлы».
+const ACCESSORY_FIRST_WORDS: &[(&str, &str)] = &[
+    ("амбушюр", "амбушюр"),
+    ("чехол", "чех"),
+    ("чехл", "чех"),
+    ("накладк", "накладк"),
+];
+
 /// В тексте объявления — только недвусмысленные фразы и целые слова. Голое «копия» поймало бы «есть копия чека»,
 /// «аналог» внутри слова — «аналогов нет», «запчаст» — продавца «Запчасти-центр», а «дефект» — «без дефектов».
 /// «Аналог» — так на Авито подписывают подделки: «Шуруповерт Makita… Качественный аналог!».
@@ -202,8 +215,12 @@ impl Category {
 
         let foreign_phrase = DEFECTS
             .iter()
+            .chain(ACCESSORY_PHRASES)
             .chain(self.accessories())
             .any(|phrase| title_text.contains(phrase) && !query_text.contains(phrase));
+        let foreign_first_word = ACCESSORY_FIRST_WORDS
+            .iter()
+            .any(|(start, in_query)| title_text.starts_with(start) && !query_text.contains(in_query));
         let foreign_variant = self
             .variants()
             .iter()
@@ -215,7 +232,7 @@ impl Category {
                     .iter()
                     .any(|game| title_words.iter().any(|w| w == game) && !query_words.iter().any(|w| w == game)));
 
-        !foreign_phrase && !foreign_variant && !foreign_set && !made_for(query, &title_words)
+        !foreign_phrase && !foreign_first_word && !foreign_variant && !foreign_set && !made_for(query, &title_words)
     }
 }
 
@@ -390,6 +407,31 @@ mod tests {
             "rtx 5060",
             "Palit Видеокарта GeForce RTX 5060 Ti Dual OC 8 ГБ (NE7506TT19P1-GB2062D)"
         ));
+    }
+
+    #[test]
+    fn accessory_without_the_word_for_is_another_product_in_any_category() {
+        let any = |query: &str, title: &str| Category::Any.is_comparable(query, title);
+
+        assert!(!any(
+            "наушники sony",
+            "SONY WH-CH520 накладки на чашки наушников (чёрные)"
+        ));
+        assert!(!any("sony wh-ch520", "Амбушюры Sony WH-CH520"));
+        assert!(!any("sony wh-ch520", "Чехол Sony WH-CH520"));
+        assert!(!any("sony wh-ch520", "Чехлы Sony WH-CH520"));
+    }
+
+    #[test]
+    fn accessory_words_do_not_touch_the_thing_itself_or_a_search_for_the_accessory() {
+        let any = |query: &str, title: &str| Category::Any.is_comparable(query, title);
+
+        assert!(any("наушники sony", "Sony WH-CH520 накладные наушники, белые"));
+        assert!(any("наушники sony", "Наушники Sony с мягкими амбушюрами"));
+        assert!(any("наушники sony", "Наушники Sony в чехле"));
+        assert!(any("чехол iphone", "Чехлы iPhone 15"));
+        assert!(any("амбушюры sony", "Амбушюры Sony WH-CH520"));
+        assert!(any("чехов", "Чехов. Рассказы"));
     }
 
     #[test]

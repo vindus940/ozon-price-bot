@@ -25,7 +25,7 @@ pub(super) const BUTTON_STALE: &str = "Этот ответ устарел — о
 pub(super) const DEAL_GONE: &str = "Этой находки уже нет";
 pub(super) const BUTTON_FAILED: &str = "Telegram не принял ответ — нажмите ещё раз";
 
-pub(super) const HELP: &str = "Напишите, что ищете, — пришлю самые дешёвые предложения Ozon, Wildberries и ДНС и таблицу для Excel.
+pub(super) const HELP: &str = "Напишите, что ищете, — пришлю самые дешёвые предложения Ozon, Wildberries, Яндекс Маркета, Авито и ДНС и таблицу для Excel.
 
 Цену можно ограничить словами <b>от</b> и <b>до</b>:
 <code>наушники sony до 5000</code>
