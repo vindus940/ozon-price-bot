@@ -1,10 +1,13 @@
 use std::sync::{Arc, Mutex};
 
+use chrono::Local;
 use eframe::egui::{self, RichText};
 
 use super::{BAD, GOOD, WARN};
 use crate::format::{rub, same_model, source_price, tile_marks};
-use crate::hunt::{BestPrices, Category, PriceProgress, PricedOffer, failure_reason, hunt_best_prices};
+use crate::hunt::{
+    BestPrices, Category, PriceMemory, PriceProgress, PricedOffer, Watch, failure_reason, hunt_best_prices,
+};
 use crate::marketplace::SourceKind;
 use crate::search::{OfferSearch, SearchRequest};
 
@@ -23,6 +26,7 @@ enum Search {
 /// Вкладка «Поиск цены»: где сейчас дешевле всего купить один товар.
 pub(super) struct PriceSearchTab {
     search: OfferSearch,
+    memory: Arc<PriceMemory>,
     runtime: tokio::runtime::Handle,
     query: String,
     category: Category,
@@ -32,9 +36,10 @@ pub(super) struct PriceSearchTab {
 }
 
 impl PriceSearchTab {
-    pub(super) fn new(search: OfferSearch, runtime: tokio::runtime::Handle) -> Self {
+    pub(super) fn new(search: OfferSearch, memory: Arc<PriceMemory>, runtime: tokio::runtime::Handle) -> Self {
         Self {
             search,
+            memory,
             runtime,
             query: String::new(),
             category: Category::Any,
@@ -44,7 +49,8 @@ impl PriceSearchTab {
         }
     }
 
-    pub(super) fn show(&mut self, ui: &mut egui::Ui) {
+    /// Вернёт слежку, если её попросили завести по этому поиску: открывать форму — забота окна.
+    pub(super) fn show(&mut self, ui: &mut egui::Ui) -> Option<Watch> {
         ui.heading("Поиск цены");
         ui.label("Где сейчас дешевле всего: один запрос сразу на всех площадках.");
         ui.add_space(6.0);
@@ -52,6 +58,8 @@ impl PriceSearchTab {
         self.controls(ui, running);
         ui.add_space(8.0);
         ui.separator();
+        let found = matches!(*self.state.lock().unwrap(), Search::Done(_));
+        let watch = (found && ui.button("Следить за этим запросом").clicked()).then(|| self.watch());
         match &*self.state.lock().unwrap() {
             Search::Idle => {
                 ui.weak("Пишите как боту: слова товара, «до 5000», «-чехол», «рейтинг от 4.5». Чем точнее модель, тем честнее сравнение.");
@@ -70,6 +78,19 @@ impl PriceSearchTab {
             }
             Search::Done(prices) => results(ui, prices),
         }
+        watch
+    }
+
+    /// Слежка на отмеченных магазинах. Авито слежка с магазинами не сравнивает, поэтому он остаётся, только если один.
+    fn watch(&self) -> Watch {
+        let chosen = self
+            .sources
+            .iter()
+            .filter(|(_, chosen)| *chosen)
+            .map(|(source, _)| *source);
+        let shops: Vec<SourceKind> = chosen.clone().filter(|source| !source.has_used_goods()).collect();
+        let shops = if shops.is_empty() { chosen.collect() } else { shops };
+        Watch::for_shops(&SearchRequest::parse(&self.query), &shops, self.category)
     }
 
     fn controls(&mut self, ui: &mut egui::Ui, running: bool) {
@@ -121,6 +142,7 @@ impl PriceSearchTab {
             found: None,
         };
         let (state, category, new_only) = (Arc::clone(&self.state), self.category, self.new_only);
+        let memory = Arc::clone(&self.memory);
         self.runtime.spawn(async move {
             let report = |progress: PriceProgress| {
                 *state.lock().unwrap() = Search::Running {
@@ -129,7 +151,13 @@ impl PriceSearchTab {
                 };
             };
             let finished = match hunt_best_prices(&search, &request, category, new_only, &report).await {
-                Ok(prices) => Search::Done(prices),
+                Ok(mut prices) => {
+                    if let Some((source, price)) = prices.best().map(|best| (best.source, best.offer.price)) {
+                        let low = memory.note(&request, source, price, Local::now());
+                        prices.price_note = low.map(|low| low.says(price));
+                    }
+                    Search::Done(prices)
+                }
                 Err((source, error)) => Search::Failed(failure_reason(source, &error)),
             };
             *state.lock().unwrap() = finished;
@@ -166,6 +194,9 @@ fn results(ui: &mut egui::Ui, prices: &BestPrices) {
         None => {
             ui.colored_label(WARN, "Надёжной цены в магазинах не нашлось — уточните запрос.");
         }
+    }
+    if let Some(note) = &prices.price_note {
+        ui.label(note);
     }
     if let Some(ad) = prices.best_ad() {
         headline(ui, "На Авито — новое или б/у, смотрите объявление", ad, None);
@@ -295,6 +326,7 @@ mod tests {
             lowest: vec![(SourceKind::Wildberries, 3_900), (SourceKind::Ozon, 4_000)],
             failed: Vec::new(),
             best_without_card: None,
+            price_note: None,
         }
     }
 

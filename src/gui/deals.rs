@@ -3,6 +3,7 @@ use eframe::egui::{self, RichText};
 use super::{BAD, GOOD};
 use crate::format::{capitalized, price_drop, rub, signed_rub, tile_marks};
 use crate::hunt::{Deal, Hunter, Miss};
+use crate::marketplace::SourceKind;
 
 /// Что показать после «мимо»: находка скрыта, а эти слова можно добавить слежке в стоп-слова.
 pub(super) struct DismissNotice {
@@ -92,6 +93,9 @@ pub(super) fn card(ui: &mut egui::Ui, deal: &Deal, actions: impl FnOnce(&mut egu
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(RichText::new(rub(deal.offer.price)).strong().size(18.0));
+            if let Some(source) = SourceKind::of_link(&deal.offer.url) {
+                ui.weak(source.title());
+            }
             if let Some(per_unit) = deal.per_unit {
                 ui.label(per_unit.price.to_string());
             }

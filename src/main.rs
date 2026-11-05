@@ -33,7 +33,7 @@ use teloxide::Bot;
 use crate::browser::Browser;
 use crate::config::Config;
 use crate::health::ParserCheck;
-use crate::hunt::{Hunter, Notifier};
+use crate::hunt::{Hunter, Notifier, PriceMemory};
 use crate::marketplace::avito::Avito;
 use crate::marketplace::dns::Dns;
 use crate::marketplace::ozon::Ozon;
@@ -95,6 +95,7 @@ fn main() -> Result<()> {
         .zip(owner)
         .map(|(bot, owner)| Arc::new(TelegramAlerts::new(bot, owner)) as Arc<dyn Notifier>);
 
+    let memory = Arc::new(PriceMemory::new(storage.clone()));
     let search = OfferSearch::new(vec![
         (SourceKind::Ozon, Arc::clone(&ozon)),
         (SourceKind::Wildberries, Arc::clone(&wildberries)),
@@ -125,6 +126,7 @@ fn main() -> Result<()> {
             bot,
             telegram,
             search.clone(),
+            Arc::clone(&memory),
             Arc::clone(&hunter),
             ozon_site,
             parser_check,
@@ -133,7 +135,7 @@ fn main() -> Result<()> {
         log::warn!("Telegram не настроен: окно работает, уведомлений не будет");
     }
 
-    gui::run(hunter, search, storage, settings, runtime.handle().clone())
+    gui::run(hunter, search, memory, storage, settings, runtime.handle().clone())
 }
 
 async fn open_ozon(ozon: Arc<Ozon>) {

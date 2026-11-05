@@ -216,6 +216,7 @@ mod tests {
                 suitable,
                 packed_in: None,
                 failed: Vec::new(),
+                price_note: None,
             },
         )
     }
@@ -241,6 +242,7 @@ mod tests {
                 suitable,
                 packed_in: None,
                 failed: Vec::new(),
+                price_note: None,
             },
         )
     }

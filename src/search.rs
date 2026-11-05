@@ -42,6 +42,8 @@ pub struct Findings {
     pub packed_in: Option<Unit>,
     /// Площадки, которые не ответили, хотя другие ответили: их предложений в списке нет, и об этом надо сказать.
     pub failed: Vec<(SourceKind, SourceError)>,
+    /// Что сказать о лучшей цене рядом с прошлыми поисками того же запроса.
+    pub price_note: Option<String>,
 }
 
 /// Цена за единицу и площадка — вывод поиска, а не данные предложения, поэтому они рядом с ним, а не в нём.
@@ -206,6 +208,7 @@ fn arranged(
         packed_in: packed_in(&suitable),
         suitable: request.order.arrange(suitable),
         failed,
+        price_note: None,
     }
 }
 

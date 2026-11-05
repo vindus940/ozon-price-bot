@@ -161,6 +161,13 @@ impl SourceKind {
         }
     }
 
+    /// Чья это ссылка на предложение: у находки слежки на нескольких магазинах площадка видна только по ней.
+    pub fn of_link(link: &str) -> Option<Self> {
+        let host = Url::parse(link).ok()?;
+        let host = host.host_str()?;
+        Self::ALL.into_iter().find(|source| source.site() == host)
+    }
+
     /// Ссылка на выдачу с фильтрами, настроенными на самом сайте: из неё слежка берёт то, что программа сама
     /// задать не умеет (у Авито «Состояние» своё в каждой категории). Адрес без `www.` приводится к нему:
     /// так сайт открывается в окне браузера программы. Ошибка — понятная причина для формы слежки.
@@ -513,6 +520,16 @@ mod tests {
     fn only_yandex_market_is_declined() {
         assert_eq!(SourceKind::YandexMarket.genitive(), "Яндекс Маркета");
         assert_eq!(SourceKind::Wildberries.genitive(), "Wildberries");
+    }
+
+    #[test]
+    fn source_of_an_offer_is_told_by_its_link() {
+        assert_eq!(
+            SourceKind::of_link("https://www.wildberries.ru/catalog/1/detail.aspx"),
+            Some(SourceKind::Wildberries)
+        );
+        assert_eq!(SourceKind::of_link("https://example.com/1"), None);
+        assert_eq!(SourceKind::of_link("не ссылка"), None);
     }
 
     #[test]

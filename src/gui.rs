@@ -14,7 +14,7 @@ use anyhow::{Result, anyhow};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::autostart::MINIMIZED_ARG;
-use crate::hunt::Hunter;
+use crate::hunt::{Hunter, PriceMemory};
 use crate::search::OfferSearch;
 use crate::settings::UserSettings;
 use crate::storage::Storage;
@@ -53,6 +53,7 @@ struct HunterApp {
 pub fn run(
     hunter: Arc<Hunter>,
     search: OfferSearch,
+    memory: Arc<PriceMemory>,
     storage: Storage,
     settings: UserSettings,
     runtime: tokio::runtime::Handle,
@@ -72,7 +73,7 @@ pub fn run(
         deals_filter: None,
         confirm_clear_deals: false,
         dismissed: None,
-        price_search: PriceSearchTab::new(search, runtime.clone()),
+        price_search: PriceSearchTab::new(search, memory, runtime.clone()),
         settings: SettingsTab::new(hunter, storage, settings, runtime),
     };
     eframe::run_native(
@@ -141,7 +142,12 @@ impl eframe::App for HunterApp {
             .exact_size(170.0)
             .show(ui, |ui| self.navigation(ui));
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::PriceSearch => self.price_search.show(ui),
+            Tab::PriceSearch => {
+                if let Some(watch) = self.price_search.show(ui) {
+                    self.form = Some(WatchForm::edit(&watch));
+                    self.tab = Tab::Watches;
+                }
+            }
             Tab::Watches => watches::show(ui, &self.hunter, &mut self.form, &mut self.pending_delete),
             Tab::Deals => deals::show(
                 ui,

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::Local;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, InputFile, LinkPreviewOptions, MessageId, ParseMode, UserId};
 use tokio::sync::watch;
@@ -13,7 +14,10 @@ use tokio::sync::watch;
 use self::buttons::{Answer, Answers, Press, Pressed, deal_key};
 use crate::export;
 use crate::health::ParserCheck;
-use crate::hunt::{Alert, Deal, Hunter, Notifier, OffersProgress, RunStatus, SourceReport, Watch, hunt_offers};
+use crate::hunt::{
+    Alert, Deal, Hunter, Notifier, OffersProgress, PriceMemory, RunStatus, SourceReport, Watch, best_shop_offer,
+    hunt_offers,
+};
 use crate::marketplace::ozon::Ozon;
 use crate::marketplace::{SourceError, SourceKind};
 use crate::search::{Findings, OfferSearch, SearchRequest};
@@ -37,6 +41,7 @@ pub struct TelegramSettings {
 /// Отвечает в чате: ищет по запросу, управляет слежками охотника и рассказывает, как дела у браузера и площадок.
 struct ChatBot {
     search: OfferSearch,
+    memory: Arc<PriceMemory>,
     hunter: Arc<Hunter>,
     ozon: Arc<Ozon>,
     allowed_users: HashSet<u64>,
@@ -79,6 +84,7 @@ pub async fn run(
     bot: Bot,
     settings: TelegramSettings,
     search: OfferSearch,
+    memory: Arc<PriceMemory>,
     hunter: Arc<Hunter>,
     ozon: Arc<Ozon>,
     parser_check: Option<ParserCheck>,
@@ -92,6 +98,7 @@ pub async fn run(
     }
     let chat_bot = Arc::new(ChatBot {
         search,
+        memory,
         hunter,
         ozon,
         allowed_users: settings.allowed_users,
@@ -174,9 +181,13 @@ impl ChatBot {
             .await?;
 
         match self.hunt_showing_progress(bot, chat, status.id, request).await {
-            Ok(findings) => {
+            Ok(mut findings) => {
                 for (source, error) in &findings.failed {
                     log::warn!("поиск «{}»: {} не ответил — {error:#}", request.query, source.title());
+                }
+                if let Some((source, price)) = best_shop_offer(&findings).map(|best| (best.source, best.offer.price)) {
+                    let low = self.memory.note(request, source, price, Local::now());
+                    findings.price_note = low.map(|low| low.says(price));
                 }
                 let table = (!findings.suitable.is_empty())
                     .then(|| export::xlsx(&findings.suitable, request.per_unit))

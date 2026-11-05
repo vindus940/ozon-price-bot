@@ -30,6 +30,8 @@ pub struct BestPrices {
     /// Сколько лучшая цена стоит без карты магазина, если это другая цена. Только на странице товара, поэтому
     /// читается один раз и только для лучшего предложения: каждый заход приближает проверку «я не робот».
     pub best_without_card: Option<u64>,
+    /// Что сказать о лучшей цене рядом с прошлыми поисками того же запроса.
+    pub price_note: Option<String>,
 }
 
 pub struct PricedOffer {
@@ -63,6 +65,16 @@ impl BestPrices {
             suspicious: found.suspicious,
         })
     }
+}
+
+/// Лучшая цена магазина в ответе бота, то же правило, что `BestPrices::best`. Список идёт от дешёвых только у простого
+/// запроса, поэтому берётся самая низкая цена.
+pub fn best_shop_offer(findings: &Findings) -> Option<&Finding> {
+    findings
+        .suitable
+        .iter()
+        .filter(|found| !found.suspicious && !found.source.has_used_goods() && !looks_used(&found.offer))
+        .min_by_key(|found| found.offer.price)
 }
 
 /// То же для ответа бота: б/у он отдельно не считает, поэтому узнаётся по тексту предложения.
@@ -314,6 +326,7 @@ fn priced(
         lowest,
         failed,
         best_without_card: None,
+        price_note: None,
     }
 }
 
@@ -401,6 +414,7 @@ mod tests {
             suitable,
             packed_in: None,
             failed: Vec::new(),
+            price_note: None,
         }
     }
 
@@ -1156,6 +1170,22 @@ mod tests {
 
         let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
         assert_eq!(sizes, [1, 1, 1, 5]);
+    }
+
+    #[test]
+    fn best_offer_of_the_bot_is_a_shop_price_and_not_a_doubtful_one() {
+        let mut suitable = market_of_five();
+        suitable.insert(0, found(SourceKind::Avito, "Наушники Sony WH-CH520", 1_000));
+        suitable.insert(
+            0,
+            Finding {
+                suspicious: true,
+                ..found(SourceKind::Ozon, "Наушники Sony WH-CH520", 900)
+            },
+        );
+        let answer = findings(suitable);
+
+        assert_eq!(best_shop_offer(&answer).unwrap().offer.price, 3_900);
     }
 
     #[test]

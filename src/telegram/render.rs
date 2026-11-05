@@ -373,8 +373,12 @@ pub(super) fn page(request: &SearchRequest, findings: &Findings, from: usize, to
     } else {
         String::new()
     };
+    let price_note = findings
+        .price_note
+        .as_deref()
+        .map_or_else(String::new, |note| format!("\n{}", escape(note)));
     let mut text = format!(
-        "<b>{query}</b>{conditions}{lowest}\nПодходят {} из {}, {}:\n",
+        "<b>{query}</b>{conditions}{lowest}{price_note}\nПодходят {} из {}, {}:\n",
         findings.suitable.len(),
         findings.scanned,
         order(request, findings)
@@ -642,6 +646,7 @@ pub(super) fn alert(alert: &Alert<'_>) -> String {
             ),
             deals,
             *lowest,
+            !watch.also_sources.is_empty(),
         ),
         Alert::NewDeals { watch, deals, lowest } => deals_message(
             &format!(
@@ -651,6 +656,7 @@ pub(super) fn alert(alert: &Alert<'_>) -> String {
             ),
             deals,
             *lowest,
+            !watch.also_sources.is_empty(),
         ),
         Alert::Failed { watch, reason } => format!(
             "⚠️ Слежка «{}» не смогла проверить {}: {}.\nПока это не исправлено, новых находок не будет. \
@@ -757,12 +763,18 @@ fn goal_summary(watch: &Watch) -> String {
 }
 
 /// Сколько находок влезает в одно сообщение — столько и показываем, остальные ждут в программе.
-fn deals_message(header: &str, deals: &[Deal], lowest: Option<Lowest>) -> String {
+fn deals_message(header: &str, deals: &[Deal], lowest: Option<Lowest>, several_shops: bool) -> String {
     let header = format!("{header}{}", lowest_line(deals, lowest));
     let mut length = header.chars().count();
     let entries: Vec<String> = deals
         .iter()
-        .map(|deal| deal_entry(deal, lowest))
+        .map(|deal| {
+            let entry = deal_entry(deal, lowest);
+            match SourceKind::of_link(&deal.offer.url).filter(|_| several_shops) {
+                Some(source) => format!("\n\n{}: {}", source.title(), entry.trim_start()),
+                None => entry,
+            }
+        })
         .take_while(|entry| {
             length += entry.chars().count();
             length <= MESSAGE_LIMIT - 100
@@ -903,7 +915,18 @@ mod tests {
                 .collect(),
             packed_in: None,
             failed: Vec::new(),
+            price_note: None,
         }
+    }
+
+    #[test]
+    fn deal_names_its_shop_only_when_the_watch_looks_at_several() {
+        let mut from_wildberries = deal(4_500);
+        from_wildberries.offer.url = "https://www.wildberries.ru/catalog/1/detail.aspx".into();
+        let deals = [from_wildberries];
+
+        assert!(deals_message("🔔", &deals, None, true).contains("\n\nWildberries: <b>4\u{a0}500"));
+        assert!(!deals_message("🔔", &deals, None, false).contains("Wildberries:"));
     }
 
     #[test]
@@ -937,6 +960,18 @@ mod tests {
             ..findings(Vec::new())
         };
         assert!(rendered(&request, &nothing, 10).contains("⚠️ Без Яндекс Маркета"));
+    }
+
+    #[test]
+    fn price_note_goes_above_the_list() {
+        let found = Findings {
+            price_note: Some("Самая низкая цена с 01.11".into()),
+            ..findings(vec![Offer::sample("Наушники", 1_000)])
+        };
+
+        let text = rendered(&SearchRequest::parse("наушники"), &found, 10);
+
+        assert!(text.contains("\nСамая низкая цена с 01.11\nПодходят 1 из"), "{text}");
     }
 
     #[test]
@@ -1148,6 +1183,7 @@ mod tests {
             ],
             packed_in: Some(Unit::Kilogram),
             failed: Vec::new(),
+            price_note: None,
         };
         let text = rendered(&SearchRequest::parse("стиральный порошок за кг"), &found, 10);
 

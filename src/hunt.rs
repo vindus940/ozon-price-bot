@@ -11,6 +11,7 @@ mod journal;
 mod market;
 mod memory;
 mod model;
+mod price_memory;
 mod schedule;
 mod trial;
 mod watch;
@@ -27,7 +28,8 @@ use tokio::sync::Notify;
 use assess::assess;
 pub use assess::{Assessment, Sifted};
 pub use best_price::{
-    BestPrices, OffersProgress, PriceProgress, PricedOffer, hunt_best_prices, hunt_offers, same_model_groups,
+    BestPrices, OffersProgress, PriceProgress, PricedOffer, best_shop_offer, hunt_best_prices, hunt_offers,
+    same_model_groups,
 };
 use book::WatchBook;
 pub use category::Category;
@@ -43,6 +45,7 @@ pub use market::MarketPrice;
 #[cfg(test)]
 pub use market::PerUnit;
 use memory::{Notified, PriceNews};
+pub use price_memory::PriceMemory;
 use schedule::Schedule;
 pub use schedule::{Outcome, Pause, RunStatus, SourceReport};
 pub use trial::TrialStatus;

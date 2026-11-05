@@ -109,23 +109,43 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Слежка по разовому запросу из Telegram: бот ищет на Ozon, условия запроса становятся условиями слежки.
-    /// Цена за килограмм имеет смысл только у расходников — так их и определяет форма слежки.
+    /// Слежка по разовому запросу из Telegram: условия запроса становятся условиями слежки. Яндекс Маркета здесь нет:
+    /// он часто просит проверку, а слежка ходит на сайты постоянно. Цена за килограмм имеет смысл только у расходников —
+    /// так их и определяет форма слежки.
     pub fn for_request(request: &SearchRequest) -> Self {
+        let category = if request.per_unit.is_some() {
+            Category::Consumables
+        } else {
+            Category::Any
+        };
+        let shops: &[SourceKind] = if request.shop.needs_marketplace() {
+            &[SourceKind::Ozon]
+        } else {
+            &[SourceKind::Ozon, SourceKind::Wildberries, SourceKind::Dns]
+        };
+        Self::for_shops(request, shops, category)
+    }
+
+    /// Слежка по запросу на этих магазинах: первый — основной, частота — как у самого строгого.
+    pub fn for_shops(request: &SearchRequest, shops: &[SourceKind], category: Category) -> Self {
+        let draft = Self::new_draft();
+        let (source, also_sources) = shops
+            .split_first()
+            .map_or((draft.source, Vec::new()), |(first, rest)| (*first, rest.to_vec()));
+        let strictest = shops.iter().map(|shop| shop.min_interval_minutes()).max();
         Self {
             name: request.query.clone(),
-            category: if request.per_unit.is_some() {
-                Category::Consumables
-            } else {
-                Category::Any
-            },
+            source,
+            also_sources,
+            category,
             query: request.query.clone(),
             price: request.price,
             stop_words: request.excluded.clone(),
             min_rating: request.min_rating,
             min_reviews: request.min_reviews,
             shop: request.shop,
-            ..Self::new_draft()
+            every_minutes: strictest.unwrap_or(0).max(draft.every_minutes),
+            ..draft
         }
     }
 
@@ -418,6 +438,34 @@ mod tests {
 
         let powder = Watch::for_request(&SearchRequest::parse("стиральный порошок за кг"));
         assert_eq!(powder.category, Category::Consumables);
+    }
+
+    #[test]
+    fn watch_from_a_request_goes_to_the_shops_of_the_search_unless_it_needs_ozon() {
+        let plain = Watch::for_request(&SearchRequest::parse("наушники sony"));
+        assert_eq!(plain.source, SourceKind::Ozon);
+        assert_eq!(plain.also_sources, [SourceKind::Wildberries, SourceKind::Dns]);
+        assert!(plain.problems(false).is_empty(), "{:?}", plain.problems(false));
+
+        let only_ozon = Watch::for_request(&SearchRequest::parse("наушники sony только ozon"));
+        assert!(only_ozon.also_sources.is_empty());
+    }
+
+    #[test]
+    fn watch_for_chosen_shops_keeps_to_the_strictest_of_them() {
+        let request = SearchRequest::parse("наушники sony");
+
+        let watch = Watch::for_shops(
+            &request,
+            &[SourceKind::Wildberries, SourceKind::YandexMarket],
+            Category::Electronics,
+        );
+
+        assert_eq!(watch.source, SourceKind::Wildberries);
+        assert_eq!(watch.also_sources, [SourceKind::YandexMarket]);
+        assert_eq!(watch.every_minutes, 30);
+        assert_eq!(watch.category, Category::Electronics);
+        assert!(watch.problems(false).is_empty(), "{:?}", watch.problems(false));
     }
 
     #[test]
